@@ -1,0 +1,12 @@
+version: "3.9"
+services:
+  media-engine:
+    image: jimstro/media-engine:latest
+    container_name: media-engine
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+    environment:
+      MEDIA_ENGINE_SELF_TEST_ON_STARTUP: "true"

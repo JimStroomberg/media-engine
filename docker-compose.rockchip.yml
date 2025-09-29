@@ -1,0 +1,35 @@
+version: "3.9"
+services:
+  media-engine:
+    image: jimstro/media-engine:rk1-latest
+    container_name: media-engine
+    privileged: true
+    restart: unless-stopped
+    ports:
+      - "8095:8080"
+    volumes:
+      - ./data:/data
+      # Rockchip multimedia userspace libraries – adjust to match your host layout
+      - /usr/lib/aarch64-linux-gnu/dri:/usr/lib/aarch64-linux-gnu/dri:ro
+      - /usr/lib/aarch64-linux-gnu/rga:/usr/lib/aarch64-linux-gnu/rga:ro
+      - /usr/lib/aarch64-linux-gnu/mpp:/usr/lib/aarch64-linux-gnu/mpp:ro
+    devices:
+      - /dev/dri:/dev/dri               # V4L2 render nodes (rkvdec / rga)
+      - /dev/mpp_service:/dev/mpp_service
+      - /dev/rga:/dev/rga
+      - /dev/dma_heap:/dev/dma_heap     # zero-copy buffers (rk3588)
+    device_cgroup_rules:
+      - "c 199:* rmw"   # media (mpp)
+      - "c 29:* rmw"    # fbdev/rga
+      - "c 226:* rmw"   # /dev/dri/*
+      - "c 240:* rmw"   # dma_heap
+    environment:
+      MEDIA_ENGINE_SELF_TEST_ON_STARTUP: "true"
+      MEDIA_ENGINE_REQUIRE_RKMPP: "true"
+      # Hook FFmpeg into Rockchip's RKMPP / RGA stack if you have a custom build
+      # MEDIA_ENGINE_FFMPEG_COMMAND: "/usr/local/bin/ffmpeg-rk"
+    security_opt:
+      - seccomp:unconfined
+    cap_add:
+      - SYS_ADMIN
+      - SYS_RAWIO
