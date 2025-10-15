@@ -5,6 +5,7 @@ Media Engine is a single-queue FastAPI service that accepts video uploads, probe
 ## Build status
 ![Build Status Main](https://github.com/jimstro/media-engine/actions/workflows/build.yaml/badge.svg?branch=main)
 ![Build Status Dev](https://github.com/jimstro/media-engine/actions/workflows/build.yaml/badge.svg?branch=dev)
+
 ## Images
 | Tag | Platform | Notes |
 | --- | --- | --- |
