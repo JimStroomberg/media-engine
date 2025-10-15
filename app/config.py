@@ -4,7 +4,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Optional, Union
 
-from pydantic import BaseSettings, Field, validator
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
@@ -27,6 +28,7 @@ class Settings(BaseSettings):
     callback_max_attempts: int = Field(3, description="Retries for webhook callbacks")
 
     self_test_on_startup: bool = Field(True, description="Run self-test pipeline when the app boots")
+    allow_cpu_fallback: bool = Field(True, description="Permit CPU video transcode fallback when hardware fails")
 
     logfile_path: Optional[Path] = Field(None, description="Optional path for structured JSON logs")
 
@@ -40,7 +42,7 @@ class Settings(BaseSettings):
         env_file = ".env"
         env_file_encoding = "utf-8"
 
-    @validator("input_dir", "work_dir", "output_dir", pre=True)
+    @field_validator("input_dir", "work_dir", "output_dir", mode="before")
     def _expand_path(cls, value: Union[Path, str]) -> Path:
         return Path(value).expanduser()
 

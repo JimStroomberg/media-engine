@@ -69,6 +69,9 @@ class TranscodeEngine:
         work_output.parent.mkdir(parents=True, exist_ok=True)
 
         record.media_duration_seconds = info.duration
+        if info.video:
+            record.source_width = info.video.width or record.source_width
+            record.source_height = info.video.height or record.source_height
 
         if self._should_remux(info, profile, target_codec):
             logger.info("Selected remux path", extra={"job_id": job_id})
@@ -87,7 +90,74 @@ class TranscodeEngine:
                 },
             )
             if use_hw:
-                self._transcode_rkmpp(record, source_path, work_output, profile, decoder, encoder)
+                allow_cpu_fallback = self.settings.allow_cpu_fallback
+                try:
+                    self._transcode_rkmpp(record, source_path, work_output, profile, decoder, encoder)
+                except RuntimeError as exc:
+                    if allow_cpu_fallback:
+                        logger.warning(
+                            "Hardware transcode failed, falling back to CPU",
+                            extra={
+                                "job_id": job_id,
+                                "profile": profile.name.value,
+                                "codec": target_codec.value,
+                                "error": str(exc),
+                            },
+                        )
+                        try:
+                            work_output.unlink()
+                        except FileNotFoundError:
+                            pass
+                        self._transcode_cpu(record, source_path, work_output, profile, target_codec)
+                    else:
+                        logger.error(
+                            "Hardware transcode failed and CPU fallback disabled",
+                            extra={
+                                "job_id": job_id,
+                                "profile": profile.name.value,
+                                "codec": target_codec.value,
+                                "error": str(exc),
+                            },
+                        )
+                        raise
+                else:
+                    matches_profile, measured_dims = self._output_matches_profile(work_output, profile)
+                    if not matches_profile:
+                        width, height = measured_dims if measured_dims else (None, None)
+                        if allow_cpu_fallback:
+                            logger.warning(
+                                "Hardware transcode output exceeds requested profile, rerunning on CPU",
+                                extra={
+                                    "job_id": job_id,
+                                    "profile": profile.name.value,
+                                    "target_width": profile.width,
+                                    "target_height": profile.height,
+                                    "output_width": width,
+                                    "output_height": height,
+                                },
+                            )
+                            try:
+                                work_output.unlink()
+                            except FileNotFoundError:
+                                pass
+                            self._transcode_cpu(record, source_path, work_output, profile, target_codec)
+                        else:
+                            logger.error(
+                                "Hardware transcode output exceeds requested profile and CPU fallback disabled",
+                                extra={
+                                    "job_id": job_id,
+                                    "profile": profile.name.value,
+                                    "target_width": profile.width,
+                                    "target_height": profile.height,
+                                    "output_width": width,
+                                    "output_height": height,
+                                },
+                            )
+                            try:
+                                work_output.unlink()
+                            except FileNotFoundError:
+                                pass
+                            raise RuntimeError("Hardware output exceeds requested profile bounds")
             else:
                 self._transcode_cpu(record, source_path, work_output, profile, target_codec)
             remuxed = False
@@ -185,10 +255,9 @@ class TranscodeEngine:
     ) -> None:
         video_codec = "libx265" if codec == CodecPreference.h265 else "libx264"
         bitrate = str(profile.video_bitrate)
-        vf = (
-            f"scale=w={profile.width}:h={profile.height}:force_original_aspect_ratio=decrease"
-            f",pad=w={profile.width}:h={profile.height}:x=(ow-iw)/2:y=(oh-ih)/2"
-        )
+        scaled_w, scaled_h = self._compute_scaled_dimensions(record, profile)
+        vf = f"scale={scaled_w}:{scaled_h}"
+        pad = f"pad={profile.width}:{profile.height}:(ow-iw)/2:(oh-ih)/2"
         cmd = [
             self.settings.ffmpeg_command,
             "-hide_banner",
@@ -198,7 +267,7 @@ class TranscodeEngine:
             "-i",
             str(source_path),
             "-vf",
-            vf,
+            f"{vf},{pad}",
             "-c:v",
             video_codec,
             "-b:v",
@@ -229,14 +298,24 @@ class TranscodeEngine:
         decoder_name: str,
         encoder_name: str,
     ) -> None:
-        filter_candidates: list[tuple[str, str]] = []
-        if Path("/dev/rga").exists():
-            filter_candidates.append(("rkrga", "rkrga=fmt=nv12,pad=ceil(iw/16)*16:ceil(ih/16)*16"))
-        filter_candidates.append(("format", "format=nv12,pad=ceil(iw/16)*16:ceil(ih/16)*16"))
+        scaled_w, scaled_h = self._compute_scaled_dimensions(record, profile)
+        target_w, target_h = profile.width, profile.height
 
-        decoder_args: list[str] = []
+        filter_candidates: list[Tuple[str, str]] = []
+        if Path("/dev/rga").exists():
+            rga_filter = f"scale_rkrga={scaled_w}:{scaled_h}:format=nv12"
+            if target_w != scaled_w or target_h != scaled_h:
+                rga_filter += f",pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2"
+            filter_candidates.append(("scale_rkrga", rga_filter))
+
+        fallback_filter = f"scale={scaled_w}:{scaled_h},format=nv12"
+        if target_w != scaled_w or target_h != scaled_h:
+            fallback_filter += f",pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2"
+        filter_candidates.append(("format", fallback_filter))
+
+        decoder_args: List[str] = []
         if decoder_name:
-            decoder_args = ["-hwaccel", "rkmpp", "-c:v", decoder_name]
+            decoder_args = ["-hwaccel", "rkmpp", "-hwaccel_output_format", "drm_prime", "-c:v", decoder_name]
 
         base_cmd = [
             self.settings.ffmpeg_command,
@@ -254,10 +333,9 @@ class TranscodeEngine:
             cmd = list(base_cmd)
             cmd.extend(["-vf", filter_expr])
             cmd.extend(["-c:v", encoder_name])
-            cmd.extend(["-pix_fmt", "nv12"])
             if encoder_name == "hevc_rkmpp":
                 cmd.extend(["-profile:v", "main", "-tag:v", "hvc1"])
-                bv, maxrate, bufsize = self._hevc_rate_control(profile.width)
+                bv, maxrate, bufsize = self._hevc_rate_control(target_w)
                 cmd.extend(["-b:v", bv, "-maxrate", maxrate, "-bufsize", bufsize])
             else:
                 cmd.extend(["-b:v", str(profile.video_bitrate)])
@@ -294,6 +372,33 @@ class TranscodeEngine:
         if last_error:
             raise last_error
         raise RuntimeError("rk transcode failed")
+
+    def _output_matches_profile(
+        self,
+        output_path: Path,
+        profile: QualityProfile,
+    ) -> tuple[bool, Optional[tuple[int, int]]]:
+        """Check whether the rendered output respects the requested profile constraints."""
+
+        try:
+            info = probe_media(output_path)
+        except ProbeError as exc:
+            logger.warning(
+                "Unable to probe hardware output",
+                extra={"path": str(output_path), "error": str(exc)},
+            )
+            return False, None
+
+        video = info.video
+        if not video or video.width is None or video.height is None:
+            logger.warning(
+                "Hardware output probe missing video dimensions",
+                extra={"path": str(output_path)},
+            )
+            return False, None
+
+        within_bounds = video.width <= profile.width and video.height <= profile.height
+        return within_bounds, (video.width, video.height)
 
     def _run_ffmpeg(
         self,
@@ -333,7 +438,9 @@ class TranscodeEngine:
 
         if return_code != 0:
             logger.error(
-                "ffmpeg command failed",
+                "ffmpeg command failed (%s): %s",
+                action,
+                stderr_data.strip(),
                 extra={"action": action, "stderr": stderr_data},
             )
             raise RuntimeError(f"ffmpeg {action} failed")
@@ -417,6 +524,21 @@ class TranscodeEngine:
         if record.media_duration_seconds is None and media_duration > 0:
             record.media_duration_seconds = media_duration
         record.updated_at = datetime.utcnow()
+
+    def _compute_scaled_dimensions(self, record, profile: QualityProfile) -> Tuple[int, int]:
+        target_w = profile.width
+        target_h = profile.height
+        src_w = record.source_width or target_w
+        src_h = record.source_height or target_h
+        if not target_w or not target_h or not src_w or not src_h:
+            return target_w, target_h
+        ratio = min(target_w / src_w, target_h / src_h)
+        ratio = min(ratio, 1.0)
+        scaled_w = max(16, int(round(src_w * ratio / 2) * 2))
+        scaled_h = max(16, int(round(src_h * ratio / 2) * 2))
+        scaled_w = min(scaled_w, target_w)
+        scaled_h = min(scaled_h, target_h)
+        return scaled_w, scaled_h
 
     def _map_codec_name(self, codec: str | None) -> CodecPreference | None:
         if not codec:

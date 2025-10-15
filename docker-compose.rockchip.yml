@@ -25,7 +25,8 @@ services:
       - "c 240:* rmw"   # dma_heap
     environment:
       MEDIA_ENGINE_SELF_TEST_ON_STARTUP: "true"
-      MEDIA_ENGINE_REQUIRE_RKMPP: "true"
+      MEDIA_ENGINE_REQUIRE_RK_ACCEL: "true"
+      MEDIA_ENGINE_ALLOW_CPU_FALLBACK: "false"
       # Hook FFmpeg into Rockchip's RKMPP / RGA stack if you have a custom build
       # MEDIA_ENGINE_FFMPEG_COMMAND: "/usr/local/bin/ffmpeg-rk"
     security_opt:

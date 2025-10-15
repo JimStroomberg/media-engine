@@ -1,0 +1,202 @@
+name: Build & Push via Docker Build Cloud
+
+on:
+  push:
+    branches: [ main, dev ]
+    tags: [ 'v*', '*.*.*' ]
+  pull_request:
+    branches: [ main, dev ]
+  workflow_dispatch:
+
+env:
+  IMAGE_REPO: jimstro/media-engine
+  BASE_PLATFORMS: linux/amd64,linux/arm64
+  RK_PLATFORMS: linux/arm64
+  CACHE_REF_BASE: jimstro/media-engine:buildcache-base
+  CACHE_REF_RK:   jimstro/media-engine:buildcache-rk1
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      # --- Checkout repository ---
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # --- Detect forked PRs ---
+      - name: Determine PR/fork context
+        id: ctx
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" && "${{ github.event.pull_request.head.repo.fork }}" == "true" ]]; then
+            echo "is_fork_pr=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_fork_pr=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # --- Login to Docker Hub ---
+      - name: Login to Docker Hub
+        if: ${{ steps.ctx.outputs.is_fork_pr != 'true' }}
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKER_USER }}
+          password: ${{ secrets.DOCKER_PAT }}
+
+      # --- Connect to Docker Build Cloud ---
+      - name: Set up Docker Buildx (Docker Build Cloud)
+        if: ${{ steps.ctx.outputs.is_fork_pr != 'true' }}
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver: cloud
+          endpoint: "jimstro/builder1" # <user-or-org>/<builder-name> from Docker Hub
+
+      # --- Local Buildx path for forked PRs ---
+      - name: Set up QEMU (forked PR)
+        if: ${{ steps.ctx.outputs.is_fork_pr == 'true' }}
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx (local) for forked PR
+        if: ${{ steps.ctx.outputs.is_fork_pr == 'true' }}
+        uses: docker/setup-buildx-action@v3
+
+      # --- Compute tags for BASE images ---
+      - name: Compute tagging (BASE)
+        id: tags_base
+        shell: bash
+        run: |
+          EVENT_NAME="${GITHUB_EVENT_NAME}"
+          REF_TYPE="${GITHUB_REF_TYPE}"   # branch|tag
+
+          # For PRs use the source branch; for pushes/tags use the ref name
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            SRC_NAME="${GITHUB_HEAD_REF}"
+          else
+            SRC_NAME="${GITHUB_REF_NAME}"  # main|dev|v1.2.3|...
+          fi
+
+          # Sanitize to a valid Docker tag token: lowercase and only [a-z0-9_.-]
+          SAFE_NAME=$(echo "$SRC_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_.-]/-/g')
+
+          if [ "$REF_TYPE" = "tag" ]; then
+            VER="${SRC_NAME#v}"
+            TAGS="${{ env.IMAGE_REPO }}:${VER},${{ env.IMAGE_REPO }}:latest"
+          elif [ "$EVENT_NAME" = "pull_request" ]; then
+            TAGS="${{ env.IMAGE_REPO }}:pr-${SAFE_NAME}-${GITHUB_SHA::7}"
+          elif [ "$REF_TYPE" = "branch" ] && [ "$SRC_NAME" = "main" ]; then
+            TAGS="${{ env.IMAGE_REPO }}:main-${GITHUB_SHA::7},${{ env.IMAGE_REPO }}:latest"
+          elif [ "$REF_TYPE" = "branch" ] && [ "$SRC_NAME" = "dev" ]; then
+            TAGS="${{ env.IMAGE_REPO }}:dev-${GITHUB_SHA::7},${{ env.IMAGE_REPO }}:dev-latest"
+          else
+            TAGS="${{ env.IMAGE_REPO }}:${SAFE_NAME}-${GITHUB_SHA::7}"
+          fi
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
+
+      # --- Compute tags for RK1 variant ---
+      - name: Compute tagging (RK1)
+        id: tags_rk
+        shell: bash
+        run: |
+          EVENT_NAME="${GITHUB_EVENT_NAME}"
+          REF_TYPE="${GITHUB_REF_TYPE}"
+
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            SRC_NAME="${GITHUB_HEAD_REF}"
+          else
+            SRC_NAME="${GITHUB_REF_NAME}"
+          fi
+
+          SAFE_NAME=$(echo "$SRC_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_.-]/-/g')
+
+          if [ "$REF_TYPE" = "tag" ]; then
+            VER="${SRC_NAME#v}"
+            TAGS="${{ env.IMAGE_REPO }}:rk1-${VER},${{ env.IMAGE_REPO }}:rk1-latest"
+          elif [ "$EVENT_NAME" = "pull_request" ]; then
+            TAGS="${{ env.IMAGE_REPO }}:rk1-pr-${SAFE_NAME}-${GITHUB_SHA::7}"
+          elif [ "$REF_TYPE" = "branch" ] && [ "$SRC_NAME" = "main" ]; then
+            TAGS="${{ env.IMAGE_REPO }}:rk1-main-${GITHUB_SHA::7},${{ env.IMAGE_REPO }}:rk1-latest"
+          elif [ "$REF_TYPE" = "branch" ] && [ "$SRC_NAME" = "dev" ]; then
+            TAGS="${{ env.IMAGE_REPO }}:rk1-dev-${GITHUB_SHA::7},${{ env.IMAGE_REPO }}:rk1-dev-latest"
+          else
+            TAGS="${{ env.IMAGE_REPO }}:rk1-${SAFE_NAME}-${GITHUB_SHA::7}"
+          fi
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
+
+      # --- BASE build (RK_VARIANT=false) ---
+      - name: Build BASE (${{ env.BASE_PLATFORMS }})
+        if: ${{ steps.ctx.outputs.is_fork_pr != 'true' }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ env.BASE_PLATFORMS }}
+          # Only push for real pushes, not for pull requests
+          push: ${{ github.event_name != 'pull_request' }}
+          sbom: true
+          provenance: true
+          build-args: |
+            RK_VARIANT=false
+          cache-from: |
+            type=registry,ref=${{ env.CACHE_REF_BASE }}
+          cache-to: |
+            type=registry,ref=${{ env.CACHE_REF_BASE }},mode=max
+          # For PRs, export to cache only (no push)
+          outputs: ${{ github.event_name == 'pull_request' && 'type=cacheonly' || 'type=registry' }}
+          tags: ${{ steps.tags_base.outputs.tags }}
+
+      - name: Build BASE (forked PR, cache-only)
+        if: ${{ steps.ctx.outputs.is_fork_pr == 'true' }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ env.BASE_PLATFORMS }}
+          push: false
+          sbom: false
+          provenance: false
+          build-args: |
+            RK_VARIANT=false
+          outputs: type=cacheonly
+          tags: ${{ steps.tags_base.outputs.tags }}
+
+      # --- RK1 build (RK_VARIANT=true) ---
+      - name: Build RK1 (${{ env.RK_PLATFORMS }})
+        if: ${{ steps.ctx.outputs.is_fork_pr != 'true' }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ env.RK_PLATFORMS }}
+          push: ${{ github.event_name != 'pull_request' }}
+          sbom: true
+          provenance: true
+          build-args: |
+            RK_VARIANT=true
+          cache-from: |
+            type=registry,ref=${{ env.CACHE_REF_RK }}
+          cache-to: |
+            type=registry,ref=${{ env.CACHE_REF_RK }},mode=max
+          outputs: ${{ github.event_name == 'pull_request' && 'type=cacheonly' || 'type=registry' }}
+          tags: ${{ steps.tags_rk.outputs.tags }}
+
+      - name: Build RK1 (forked PR, cache-only)
+        if: ${{ steps.ctx.outputs.is_fork_pr == 'true' }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ env.RK_PLATFORMS }}
+          push: false
+          sbom: false
+          provenance: false
+          build-args: |
+            RK_VARIANT=true
+          outputs: type=cacheonly
+          tags: ${{ steps.tags_rk.outputs.tags }}

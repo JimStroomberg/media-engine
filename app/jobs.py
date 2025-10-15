@@ -46,6 +46,8 @@ class JobRecord:
     transcode_finished_at: Optional[datetime] = None
     media_duration_seconds: Optional[float] = None
     transcode_media_seconds: Optional[float] = None
+    source_width: Optional[int] = None
+    source_height: Optional[int] = None
 
     def to_detail(self) -> JobDetail:
         now = datetime.utcnow()
@@ -89,6 +91,8 @@ class JobRecord:
             transcode_seconds=transcode_seconds,
             transcode_progress=progress,
             transcode_eta_seconds=eta_seconds,
+            source_width=self.source_width,
+            source_height=self.source_height,
         )
 
 

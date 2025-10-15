@@ -2,6 +2,10 @@
 
 Media Engine is a single-queue FastAPI service that accepts video uploads, probes the content with `ffprobe`, picks a quality preset, and produces an MP4 using an `ffmpeg` pipeline. The first release focuses on a portable CPU baseline (Ubuntu 24.04 container) so it can run on any host while we layer in hardware-specific backends (e.g. Rockchip RK1, NVIDIA Orin) later.
 
+## Build status
+[![Build & Push via Docker Build Cloud](https://github.com/JimStroomberg/media-engine/actions/workflows/build.yaml/badge.svg?branch=main)](https://github.com/JimStroomberg/media-engine/actions/workflows/build.yaml)
+[![Build & Push via Docker Build Cloud](https://github.com/JimStroomberg/media-engine/actions/workflows/build.yaml/badge.svg?branch=dev)](https://github.com/JimStroomberg/media-engine/actions/workflows/build.yaml)
+
 ## Images
 | Tag | Platform | Notes |
 | --- | --- | --- |
@@ -145,6 +149,5 @@ Environment knobs:
 - `PUSH` – Set to `false` to load images locally instead of pushing.
 
 ## Roadmap notes
-- Add modular backends (Rockchip RK1 via GStreamer/MPP, NVIDIA Orin via NVENC/NVDEC) behind the current ffmpeg orchestration layer.
+- Add modular backends (Rockchip RK1 via GStreamer/MPP, NVIDIA Orin via NVENC/NVDEC) behind the current ffmpeg orchestration layer. (or maybe seperate releases in case of kernel contraints)
 - Persist job state across restarts (SQLite or Redis) once multi-instance deployments are in scope.
-- Expose Prometheus-compatible metrics and structured logs.
