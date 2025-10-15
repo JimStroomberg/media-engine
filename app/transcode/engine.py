@@ -315,7 +315,7 @@ class TranscodeEngine:
 
         decoder_args: List[str] = []
         if decoder_name:
-            decoder_args = ["-hwaccel", "rkmpp", "-c:v", decoder_name]
+            decoder_args = ["-hwaccel", "rkmpp", "-hwaccel_output_format", "drm", "-c:v", decoder_name]
 
         base_cmd = [
             self.settings.ffmpeg_command,
@@ -332,7 +332,7 @@ class TranscodeEngine:
         for label, filter_expr in filter_candidates:
             cmd = list(base_cmd)
             cmd.extend(["-vf", filter_expr])
-            cmd.extend(["-c:v", encoder_name, "-pix_fmt", "nv12"])
+            cmd.extend(["-c:v", encoder_name])
             if encoder_name == "hevc_rkmpp":
                 cmd.extend(["-profile:v", "main", "-tag:v", "hvc1"])
                 bv, maxrate, bufsize = self._hevc_rate_control(target_w)
