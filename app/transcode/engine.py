@@ -315,7 +315,7 @@ class TranscodeEngine:
 
         decoder_args: List[str] = []
         if decoder_name:
-            decoder_args = ["-hwaccel", "rkmpp", "-hwaccel_output_format", "drm", "-c:v", decoder_name]
+            decoder_args = ["-hwaccel", "rkmpp", "-hwaccel_output_format", "drm_prime", "-c:v", decoder_name]
 
         base_cmd = [
             self.settings.ffmpeg_command,
