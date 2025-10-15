@@ -1,9 +1,11 @@
-name: Build & Push Docker images
+name: Build & Push via Docker Build Cloud
 
 on:
   push:
     branches: [ main, dev ]
     tags: [ 'v*', '*.*.*' ]
+  pull_request:
+    branches: [ main, dev ]
   workflow_dispatch:
 
 env:
@@ -23,24 +25,27 @@ jobs:
     permissions:
       contents: read
       packages: write
-      id-token: write  # nodig voor provenance attestations
+      id-token: write
     steps:
+      # --- Checkout repository ---
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
-
+      # --- Login to Docker Hub ---
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          username: ${{ vars.DOCKER_USER }}
+          password: ${{ secrets.DOCKER_PAT }}
 
-      # ---------- Tags berekenen ----------
+      # --- Connect to Docker Build Cloud ---
+      - name: Set up Docker Buildx (Docker Build Cloud)
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver: cloud
+          endpoint: "jimstro/builder1" # <user-or-org>/<builder-name> from Docker Hub
+
+      # --- Compute tags for BASE images ---
       - name: Compute tagging (BASE)
         id: tags_base
         shell: bash
@@ -60,6 +65,7 @@ jobs:
           fi
           echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
 
+      # --- Compute tags for RK1 variant ---
       - name: Compute tagging (RK1)
         id: tags_rk
         shell: bash
@@ -79,14 +85,15 @@ jobs:
           fi
           echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
 
-      # ---------- BASE build (RK_VARIANT=false) ----------
-      - name: Build & Push BASE (${{ env.BASE_PLATFORMS }})
+      # --- BASE build (RK_VARIANT=false) ---
+      - name: Build BASE (${{ env.BASE_PLATFORMS }})
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
           platforms: ${{ env.BASE_PLATFORMS }}
-          push: true
+          # Only push for real pushes, not for pull requests
+          push: ${{ github.event_name != 'pull_request' }}
           sbom: true
           provenance: true
           build-args: |
@@ -95,16 +102,18 @@ jobs:
             type=registry,ref=${{ env.CACHE_REF_BASE }}
           cache-to: |
             type=registry,ref=${{ env.CACHE_REF_BASE }},mode=max
+          # For PRs, export to cache only (no push)
+          outputs: ${{ github.event_name == 'pull_request' && 'type=cacheonly' || 'type=registry' }}
           tags: ${{ steps.tags_base.outputs.tags }}
 
-      # ---------- RK1 build (RK_VARIANT=true) ----------
-      - name: Build & Push RK1 (${{ env.RK_PLATFORMS }})
+      # --- RK1 build (RK_VARIANT=true) ---
+      - name: Build RK1 (${{ env.RK_PLATFORMS }})
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
           platforms: ${{ env.RK_PLATFORMS }}
-          push: true
+          push: ${{ github.event_name != 'pull_request' }}
           sbom: true
           provenance: true
           build-args: |
@@ -113,4 +122,5 @@ jobs:
             type=registry,ref=${{ env.CACHE_REF_RK }}
           cache-to: |
             type=registry,ref=${{ env.CACHE_REF_RK }},mode=max
+          outputs: ${{ github.event_name == 'pull_request' && 'type=cacheonly' || 'type=registry' }}
           tags: ${{ steps.tags_rk.outputs.tags }}
