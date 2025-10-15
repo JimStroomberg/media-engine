@@ -34,14 +34,14 @@ PROFILES: Dict[QualityTarget, QualityProfile] = {
         name=QualityTarget.hd_720p,
         width=1280,
         height=720,
-        video_bitrate=6_000_000,
+        video_bitrate=4_000_000,
         codec=CodecPreference.h264,
     ),
     QualityTarget.sd_480p: QualityProfile(
         name=QualityTarget.sd_480p,
         width=854,
         height=480,
-        video_bitrate=3_000_000,
+        video_bitrate=2_500_000,
         codec=CodecPreference.h264,
     ),
 }

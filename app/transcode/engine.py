@@ -303,13 +303,10 @@ class TranscodeEngine:
 
         filter_candidates: list[Tuple[str, str]] = []
         if Path("/dev/rga").exists():
-            rga_filter = f"rkrga=fmt=nv12,dst_w={scaled_w},dst_h={scaled_h}"
+            rga_filter = f"scale_rkrga={scaled_w}:{scaled_h}:format=nv12"
             if target_w != scaled_w or target_h != scaled_h:
-                rga_filter = (
-                    rga_filter
-                    + f",pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2"
-                )
-            filter_candidates.append(("rkrga", rga_filter))
+                rga_filter += f",pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2"
+            filter_candidates.append(("scale_rkrga", rga_filter))
 
         fallback_filter = f"scale={scaled_w}:{scaled_h},format=nv12"
         if target_w != scaled_w or target_h != scaled_h:
@@ -441,7 +438,9 @@ class TranscodeEngine:
 
         if return_code != 0:
             logger.error(
-                "ffmpeg command failed",
+                "ffmpeg command failed (%s): %s",
+                action,
+                stderr_data.strip(),
                 extra={"action": action, "stderr": stderr_data},
             )
             raise RuntimeError(f"ffmpeg {action} failed")
