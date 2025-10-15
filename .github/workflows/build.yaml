@@ -31,8 +31,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # --- Detect forked PRs ---
+      - name: Determine PR/fork context
+        id: ctx
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" && "${{ github.event.pull_request.head.repo.fork }}" == "true" ]]; then
+            echo "is_fork_pr=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_fork_pr=false" >> "$GITHUB_OUTPUT"
+          fi
+
       # --- Login to Docker Hub ---
       - name: Login to Docker Hub
+        if: ${{ steps.ctx.outputs.is_fork_pr != 'true' }}
         uses: docker/login-action@v3
         with:
           username: ${{ vars.DOCKER_USER }}
@@ -40,10 +52,20 @@ jobs:
 
       # --- Connect to Docker Build Cloud ---
       - name: Set up Docker Buildx (Docker Build Cloud)
+        if: ${{ steps.ctx.outputs.is_fork_pr != 'true' }}
         uses: docker/setup-buildx-action@v3
         with:
           driver: cloud
           endpoint: "jimstro/builder1" # <user-or-org>/<builder-name> from Docker Hub
+
+      # --- Local Buildx path for forked PRs ---
+      - name: Set up QEMU (forked PR)
+        if: ${{ steps.ctx.outputs.is_fork_pr == 'true' }}
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx (local) for forked PR
+        if: ${{ steps.ctx.outputs.is_fork_pr == 'true' }}
+        uses: docker/setup-buildx-action@v3
 
       # --- Compute tags for BASE images ---
       - name: Compute tagging (BASE)
@@ -87,6 +109,7 @@ jobs:
 
       # --- BASE build (RK_VARIANT=false) ---
       - name: Build BASE (${{ env.BASE_PLATFORMS }})
+        if: ${{ steps.ctx.outputs.is_fork_pr != 'true' }}
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -106,8 +129,24 @@ jobs:
           outputs: ${{ github.event_name == 'pull_request' && 'type=cacheonly' || 'type=registry' }}
           tags: ${{ steps.tags_base.outputs.tags }}
 
+      - name: Build BASE (forked PR, cache-only)
+        if: ${{ steps.ctx.outputs.is_fork_pr == 'true' }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ env.BASE_PLATFORMS }}
+          push: false
+          sbom: false
+          provenance: false
+          build-args: |
+            RK_VARIANT=false
+          outputs: type=cacheonly
+          tags: ${{ steps.tags_base.outputs.tags }}
+
       # --- RK1 build (RK_VARIANT=true) ---
       - name: Build RK1 (${{ env.RK_PLATFORMS }})
+        if: ${{ steps.ctx.outputs.is_fork_pr != 'true' }}
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -123,4 +162,19 @@ jobs:
           cache-to: |
             type=registry,ref=${{ env.CACHE_REF_RK }},mode=max
           outputs: ${{ github.event_name == 'pull_request' && 'type=cacheonly' || 'type=registry' }}
+          tags: ${{ steps.tags_rk.outputs.tags }}
+
+      - name: Build RK1 (forked PR, cache-only)
+        if: ${{ steps.ctx.outputs.is_fork_pr == 'true' }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ env.RK_PLATFORMS }}
+          push: false
+          sbom: false
+          provenance: false
+          build-args: |
+            RK_VARIANT=true
+          outputs: type=cacheonly
           tags: ${{ steps.tags_rk.outputs.tags }}

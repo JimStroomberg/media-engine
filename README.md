@@ -3,8 +3,8 @@
 Media Engine is a single-queue FastAPI service that accepts video uploads, probes the content with `ffprobe`, picks a quality preset, and produces an MP4 using an `ffmpeg` pipeline. The first release focuses on a portable CPU baseline (Ubuntu 24.04 container) so it can run on any host while we layer in hardware-specific backends (e.g. Rockchip RK1, NVIDIA Orin) later.
 
 ## Build status
-![Build Status](https://github.com/jimstro/media-engine/actions/workflows/build.yaml/badge.svg?branch=main)
-![Build Status](https://github.com/jimstro/media-engine/actions/workflows/build.yaml/badge.svg?branch=dev)
+![Build Status Main](https://github.com/jimstro/media-engine/actions/workflows/build.yaml/badge.svg?branch=main)
+![Build Status Dev](https://github.com/jimstro/media-engine/actions/workflows/build.yaml/badge.svg?branch=dev)
 ## Images
 | Tag | Platform | Notes |
 | --- | --- | --- |
