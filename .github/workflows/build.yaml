@@ -72,18 +72,30 @@ jobs:
         id: tags_base
         shell: bash
         run: |
-          REF="${GITHUB_REF_TYPE}"   # branch|tag
-          NAME="${GITHUB_REF_NAME}"  # main|dev|v1.2.3|...
+          EVENT_NAME="${GITHUB_EVENT_NAME}"
+          REF_TYPE="${GITHUB_REF_TYPE}"   # branch|tag
 
-          if [ "$REF" = "tag" ]; then
-            VER="${NAME#v}"
+          # For PRs use the source branch; for pushes/tags use the ref name
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            SRC_NAME="${GITHUB_HEAD_REF}"
+          else
+            SRC_NAME="${GITHUB_REF_NAME}"  # main|dev|v1.2.3|...
+          fi
+
+          # Sanitize to a valid Docker tag token: lowercase and only [a-z0-9_.-]
+          SAFE_NAME=$(echo "$SRC_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_.-]/-/g')
+
+          if [ "$REF_TYPE" = "tag" ]; then
+            VER="${SRC_NAME#v}"
             TAGS="${{ env.IMAGE_REPO }}:${VER},${{ env.IMAGE_REPO }}:latest"
-          elif [ "$REF" = "branch" ] && [ "$NAME" = "main" ]; then
+          elif [ "$EVENT_NAME" = "pull_request" ]; then
+            TAGS="${{ env.IMAGE_REPO }}:pr-${SAFE_NAME}-${GITHUB_SHA::7}"
+          elif [ "$REF_TYPE" = "branch" ] && [ "$SRC_NAME" = "main" ]; then
             TAGS="${{ env.IMAGE_REPO }}:main-${GITHUB_SHA::7},${{ env.IMAGE_REPO }}:latest"
-          elif [ "$REF" = "branch" ] && [ "$NAME" = "dev" ]; then
+          elif [ "$REF_TYPE" = "branch" ] && [ "$SRC_NAME" = "dev" ]; then
             TAGS="${{ env.IMAGE_REPO }}:dev-${GITHUB_SHA::7},${{ env.IMAGE_REPO }}:dev-latest"
           else
-            TAGS="${{ env.IMAGE_REPO }}:${NAME}-${GITHUB_SHA::7}"
+            TAGS="${{ env.IMAGE_REPO }}:${SAFE_NAME}-${GITHUB_SHA::7}"
           fi
           echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
 
@@ -92,18 +104,28 @@ jobs:
         id: tags_rk
         shell: bash
         run: |
-          REF="${GITHUB_REF_TYPE}"
-          NAME="${GITHUB_REF_NAME}"
+          EVENT_NAME="${GITHUB_EVENT_NAME}"
+          REF_TYPE="${GITHUB_REF_TYPE}"
 
-          if [ "$REF" = "tag" ]; then
-            VER="${NAME#v}"
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            SRC_NAME="${GITHUB_HEAD_REF}"
+          else
+            SRC_NAME="${GITHUB_REF_NAME}"
+          fi
+
+          SAFE_NAME=$(echo "$SRC_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_.-]/-/g')
+
+          if [ "$REF_TYPE" = "tag" ]; then
+            VER="${SRC_NAME#v}"
             TAGS="${{ env.IMAGE_REPO }}:rk1-${VER},${{ env.IMAGE_REPO }}:rk1-latest"
-          elif [ "$REF" = "branch" ] && [ "$NAME" = "main" ]; then
+          elif [ "$EVENT_NAME" = "pull_request" ]; then
+            TAGS="${{ env.IMAGE_REPO }}:rk1-pr-${SAFE_NAME}-${GITHUB_SHA::7}"
+          elif [ "$REF_TYPE" = "branch" ] && [ "$SRC_NAME" = "main" ]; then
             TAGS="${{ env.IMAGE_REPO }}:rk1-main-${GITHUB_SHA::7},${{ env.IMAGE_REPO }}:rk1-latest"
-          elif [ "$REF" = "branch" ] && [ "$NAME" = "dev" ]; then
+          elif [ "$REF_TYPE" = "branch" ] && [ "$SRC_NAME" = "dev" ]; then
             TAGS="${{ env.IMAGE_REPO }}:rk1-dev-${GITHUB_SHA::7},${{ env.IMAGE_REPO }}:rk1-dev-latest"
           else
-            TAGS="${{ env.IMAGE_REPO }}:rk1-${NAME}-${GITHUB_SHA::7}"
+            TAGS="${{ env.IMAGE_REPO }}:rk1-${SAFE_NAME}-${GITHUB_SHA::7}"
           fi
           echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
 
