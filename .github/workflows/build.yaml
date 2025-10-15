@@ -1,0 +1,116 @@
+name: Build & Push Docker images
+
+on:
+  push:
+    branches: [ main, dev ]
+    tags: [ 'v*', '*.*.*' ]
+  workflow_dispatch:
+
+env:
+  IMAGE_REPO: jimstro/media-engine
+  BASE_PLATFORMS: linux/amd64,linux/arm64
+  RK_PLATFORMS: linux/arm64
+  CACHE_REF_BASE: jimstro/media-engine:buildcache-base
+  CACHE_REF_RK:   jimstro/media-engine:buildcache-rk1
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write  # nodig voor provenance attestations
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # ---------- Tags berekenen ----------
+      - name: Compute tagging (BASE)
+        id: tags_base
+        shell: bash
+        run: |
+          REF="${GITHUB_REF_TYPE}"   # branch|tag
+          NAME="${GITHUB_REF_NAME}"  # main|dev|v1.2.3|...
+
+          if [ "$REF" = "tag" ]; then
+            VER="${NAME#v}"
+            TAGS="${{ env.IMAGE_REPO }}:${VER},${{ env.IMAGE_REPO }}:latest"
+          elif [ "$REF" = "branch" ] && [ "$NAME" = "main" ]; then
+            TAGS="${{ env.IMAGE_REPO }}:main-${GITHUB_SHA::7},${{ env.IMAGE_REPO }}:latest"
+          elif [ "$REF" = "branch" ] && [ "$NAME" = "dev" ]; then
+            TAGS="${{ env.IMAGE_REPO }}:dev-${GITHUB_SHA::7},${{ env.IMAGE_REPO }}:dev-latest"
+          else
+            TAGS="${{ env.IMAGE_REPO }}:${NAME}-${GITHUB_SHA::7}"
+          fi
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
+
+      - name: Compute tagging (RK1)
+        id: tags_rk
+        shell: bash
+        run: |
+          REF="${GITHUB_REF_TYPE}"
+          NAME="${GITHUB_REF_NAME}"
+
+          if [ "$REF" = "tag" ]; then
+            VER="${NAME#v}"
+            TAGS="${{ env.IMAGE_REPO }}:rk1-${VER},${{ env.IMAGE_REPO }}:rk1-latest"
+          elif [ "$REF" = "branch" ] && [ "$NAME" = "main" ]; then
+            TAGS="${{ env.IMAGE_REPO }}:rk1-main-${GITHUB_SHA::7},${{ env.IMAGE_REPO }}:rk1-latest"
+          elif [ "$REF" = "branch" ] && [ "$NAME" = "dev" ]; then
+            TAGS="${{ env.IMAGE_REPO }}:rk1-dev-${GITHUB_SHA::7},${{ env.IMAGE_REPO }}:rk1-dev-latest"
+          else
+            TAGS="${{ env.IMAGE_REPO }}:rk1-${NAME}-${GITHUB_SHA::7}"
+          fi
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
+
+      # ---------- BASE build (RK_VARIANT=false) ----------
+      - name: Build & Push BASE (${{ env.BASE_PLATFORMS }})
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ env.BASE_PLATFORMS }}
+          push: true
+          sbom: true
+          provenance: true
+          build-args: |
+            RK_VARIANT=false
+          cache-from: |
+            type=registry,ref=${{ env.CACHE_REF_BASE }}
+          cache-to: |
+            type=registry,ref=${{ env.CACHE_REF_BASE }},mode=max
+          tags: ${{ steps.tags_base.outputs.tags }}
+
+      # ---------- RK1 build (RK_VARIANT=true) ----------
+      - name: Build & Push RK1 (${{ env.RK_PLATFORMS }})
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ env.RK_PLATFORMS }}
+          push: true
+          sbom: true
+          provenance: true
+          build-args: |
+            RK_VARIANT=true
+          cache-from: |
+            type=registry,ref=${{ env.CACHE_REF_RK }}
+          cache-to: |
+            type=registry,ref=${{ env.CACHE_REF_RK }},mode=max
+          tags: ${{ steps.tags_rk.outputs.tags }}

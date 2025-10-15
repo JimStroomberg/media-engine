@@ -145,6 +145,5 @@ Environment knobs:
 - `PUSH` – Set to `false` to load images locally instead of pushing.
 
 ## Roadmap notes
-- Add modular backends (Rockchip RK1 via GStreamer/MPP, NVIDIA Orin via NVENC/NVDEC) behind the current ffmpeg orchestration layer.
+- Add modular backends (Rockchip RK1 via GStreamer/MPP, NVIDIA Orin via NVENC/NVDEC) behind the current ffmpeg orchestration layer. (or maybe seperate releases in case of kernel contraints)
 - Persist job state across restarts (SQLite or Redis) once multi-instance deployments are in scope.
-- Expose Prometheus-compatible metrics and structured logs.

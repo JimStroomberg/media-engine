@@ -28,7 +28,7 @@ ENV PATH="/opt/venv/bin:${PATH}"
 
 WORKDIR /app
 COPY requirements.txt ./
-RUN pip install --upgrade pip && pip install -r requirements.txt
+RUN pip install --upgrade pip && pip install --upgrade -r requirements.txt
 
 COPY app ./app
 COPY README.md ./README.md

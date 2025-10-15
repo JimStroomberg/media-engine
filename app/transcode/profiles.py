@@ -27,7 +27,7 @@ PROFILES: Dict[QualityTarget, QualityProfile] = {
         name=QualityTarget.fhd_1080p,
         width=1920,
         height=1080,
-        video_bitrate=12_000_000,
+        video_bitrate=8_000_000,
         codec=CodecPreference.h264,
     ),
     QualityTarget.hd_720p: QualityProfile(

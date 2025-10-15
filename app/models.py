@@ -59,6 +59,8 @@ class JobDetail(BaseModel):
     transcode_seconds: Optional[float] = None
     transcode_progress: Optional[float] = None
     transcode_eta_seconds: Optional[float] = None
+    source_width: Optional[int] = None
+    source_height: Optional[int] = None
 
     class Config:
         json_encoders = {
