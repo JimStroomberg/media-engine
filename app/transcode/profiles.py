@@ -39,7 +39,7 @@ PROFILES: Dict[QualityTarget, QualityProfile] = {
     ),
     QualityTarget.sd_480p: QualityProfile(
         name=QualityTarget.sd_480p,
-        width=854,
+        width=848,
         height=480,
         video_bitrate=2_500_000,
         codec=CodecPreference.h264,
