@@ -22,6 +22,7 @@ class QualityTarget(str, Enum):
     fhd_1080p = "fhd_1080p"
     hd_720p = "hd_720p"
     sd_480p = "sd_480p"
+    audio_only = "audio_only"
 
 
 class CodecPreference(str, Enum):
@@ -31,7 +32,7 @@ class CodecPreference(str, Enum):
 
 
 class JobRequest(BaseModel):
-    quality: QualityTarget = Field(QualityTarget.auto, description="Desired output quality preset")
+    quality: QualityTarget = Field(QualityTarget.auto, description="Desired output quality preset (use audio_only for AAC extraction)")
     codec: CodecPreference = Field(CodecPreference.auto, description="Preferred codec for output")
     callback_url: Optional[HttpUrl] = Field(None, description="Optional webhook to call when the job completes")
 
