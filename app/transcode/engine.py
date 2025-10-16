@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Tuple
 
 from ..config import get_settings
-from ..models import CodecPreference, JobRequest
+from ..models import CodecPreference, JobRequest, QualityTarget
 from ..transcode.probe import MediaInfo, ProbeError, probe_media
 from ..transcode.profiles import QualityProfile, choose_profile
 
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 class TranscodeResult:
     output_path: Path
     remuxed: bool
-    profile: QualityProfile
+    profile: Optional[QualityProfile]
     codec: CodecPreference
 
 
@@ -51,7 +51,24 @@ class TranscodeEngine:
                 "video_height": getattr(video_info, "height", None),
             },
         )
+        record.media_duration_seconds = info.duration
+
+        if request.quality == QualityTarget.audio_only:
+            return self._process_audio_only(record, info, source_path, job_id)
+
         profile = self._select_profile(info, request)
+        if request.quality != QualityTarget.auto and profile.name != request.quality:
+            logger.info(
+                "Requested quality downgraded to fit source",
+                extra={
+                    "job_id": job_id,
+                    "requested_quality": request.quality.value,
+                    "resolved_quality": profile.name.value,
+                    "source_width": getattr(video_info, "width", None),
+                    "source_height": getattr(video_info, "height", None),
+                },
+            )
+        record.quality = profile.name
         target_codec = self._resolve_codec(info, profile, request)
         logger.info(
             "Profile resolved",
@@ -68,7 +85,6 @@ class TranscodeEngine:
         work_output = self.settings.work_dir / f"{job_id}.mp4"
         work_output.parent.mkdir(parents=True, exist_ok=True)
 
-        record.media_duration_seconds = info.duration
         if info.video:
             record.source_width = info.video.width or record.source_width
             record.source_height = info.video.height or record.source_height
@@ -228,6 +244,30 @@ class TranscodeEngine:
 
         return True
 
+    def _process_audio_only(
+        self,
+        record,
+        info: MediaInfo,
+        source_path: Path,
+        job_id: str,
+    ) -> TranscodeResult:
+        if not info.audio:
+            raise RuntimeError("No audio stream available for extraction")
+
+        output_path = self.settings.output_dir / f"{job_id}.m4a"
+        work_output = self.settings.work_dir / f"{job_id}.m4a"
+        work_output.parent.mkdir(parents=True, exist_ok=True)
+
+        self._transcode_audio(record, source_path, work_output)
+        shutil.move(work_output, output_path)
+        if record.media_duration_seconds is not None:
+            record.transcode_media_seconds = record.media_duration_seconds
+        logger.info(
+            "Audio extraction finished",
+            extra={"job_id": job_id, "output_path": str(output_path)},
+        )
+        return TranscodeResult(output_path=output_path, remuxed=False, profile=None, codec=CodecPreference.auto)
+
     def _remux(self, source_path: Path, dest_path: Path) -> None:
         cmd = [
             self.settings.ffmpeg_command,
@@ -244,6 +284,36 @@ class TranscodeEngine:
             str(dest_path),
         ]
         self._run_ffmpeg(cmd, action="remux")
+
+    def _transcode_audio(
+        self,
+        record,
+        source_path: Path,
+        dest_path: Path,
+    ) -> None:
+        cmd = [
+            self.settings.ffmpeg_command,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(source_path),
+            "-vn",
+            "-acodec",
+            "aac",
+            "-b:a",
+            "192k",
+            "-movflags",
+            "+faststart",
+            str(dest_path),
+        ]
+        duration = record.media_duration_seconds or 0.0
+        self._run_ffmpeg(
+            cmd,
+            action="extract-audio",
+            progress_handler=lambda seconds: self._update_progress(record, seconds, duration),
+        )
 
     def _transcode_cpu(
         self,

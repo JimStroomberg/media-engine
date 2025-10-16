@@ -1,6 +1,6 @@
 # media-engine
 
-Media Engine is a single-queue FastAPI service that accepts video uploads, probes the content with `ffprobe`, picks a quality preset, and produces an MP4 using an `ffmpeg` pipeline. The first release focuses on a portable CPU baseline (Ubuntu 24.04 container) so it can run on any host while we layer in hardware-specific backends (e.g. Rockchip RK1, NVIDIA Orin) later.
+Media Engine is a single-queue FastAPI service that accepts video uploads, probes the content with `ffprobe`, picks a quality preset, and produces an MP4 (or M4A for audio-only jobs) using an `ffmpeg` pipeline. The first release focuses on a portable CPU baseline (Ubuntu 24.04 container) so it can run on any host while we layer in hardware-specific backends (e.g. Rockchip RK1, NVIDIA Orin) later.
 
 ## Build status
 [![Build & Push via Docker Build Cloud](https://github.com/JimStroomberg/media-engine/actions/workflows/build.yaml/badge.svg?branch=main)](https://github.com/JimStroomberg/media-engine/actions/workflows/build.yaml)
@@ -14,7 +14,8 @@ Media Engine is a single-queue FastAPI service that accepts video uploads, probe
 
 ## Highlights
 - **FFmpeg-first pipeline** – uses `ffmpeg` for probing, remuxing, and H.264/H.265 encoding by default; hardware integrations can be added behind the same interface.
-- **Smart defaults** – omit quality/codec to let the service choose the closest preset (2160p/1080p/720p/480p) based on the source.
+- **Smart defaults** – omit quality/codec to let the service choose the closest preset (2160p/1080p/720p/480p) based on the source; if you request a higher preset than the input can support, it automatically downgrades to the best fit.
+- **Audio-only path** – send `quality=audio_only` to extract AAC audio without video; this always runs on the CPU and returns an `.m4a`.
 - **Single active job** – an asyncio worker guarantees only one transcode at a time; additional requests queue automatically.
 - **Status + callbacks** – poll the REST API for job progress or supply a webhook to receive completion notifications.
 - **Boot self-test** – confirms `ffmpeg`/`ffprobe` are available and performs a tiny encode before the API starts serving traffic.
@@ -40,7 +41,7 @@ curl -X POST \
   http://localhost:8080/jobs
 ```
 Fields:
-- `quality` – `auto` (default), `uhd_2160p`, `fhd_1080p`, `hd_720p`, or `sd_480p`.
+- `quality` – `auto` (default), `uhd_2160p`, `fhd_1080p`, `hd_720p`, `sd_480p`, or `audio_only`. When a higher preset is requested than the source resolution supports, the engine transparently downgrades to the best matching profile (logged in the job history).
 - `codec` – `auto` (default), `h264`, or `h265`.
 - `callback_url` – optional HTTPS endpoint receiving `{ job_id, status, output_path, message }`.
 
@@ -52,6 +53,7 @@ When `status` becomes `completed`, download the file:
 ```bash
 curl -L -o output.mp4 http://localhost:8080/jobs/<job-id>/download
 ```
+Audio-only jobs will download as `.m4a`.
 
 ## Startup self-test
 With `MEDIA_ENGINE_SELF_TEST_ON_STARTUP=true` (default) the container will:
@@ -74,7 +76,8 @@ Environment variables (prefixed with `MEDIA_ENGINE_`):
 | `MEDIA_ENGINE_JOB_RETENTION_MINUTES` | `120` | Minutes to keep completed job metadata and files |
 | `MEDIA_ENGINE_CALLBACK_TIMEOUT_SECONDS` | `10` | Timeout per webhook attempt |
 | `MEDIA_ENGINE_CALLBACK_MAX_ATTEMPTS` | `3` | Delivery retries |
-| `MEDIA_ENGINE_REQUIRE_RKMPP` | `false` | Fail startup when RKMPP hardware acceleration is expected but missing |
+| `MEDIA_ENGINE_ALLOW_CPU_FALLBACK` | `true` | Permit CPU video fallback when hardware encoding fails (set `false` on RK1 to fail fast) |
+| `MEDIA_ENGINE_REQUIRE_RK_ACCEL` | `false` | Fail startup when RKMPP hardware acceleration is expected but missing |
 
 Quality profiles live in `app/transcode/profiles.py`; adjust widths/bitrates or add new presets as needed.
 
@@ -114,7 +117,7 @@ If you deploy on an RK1 (RK3588) host and want hardware decode/encode, install t
 
 1. **Expose devices and libraries** – use `docker-compose.rockchip.yml` (ships with the repo) or mirror its device/volume mounts on your orchestrator.
 2. **Install the RK multimedia ffmpeg** – the `rk1-latest` image already includes the Rockchip multimedia ffmpeg build. If you derive your own image, run `./scripts/install_ffmpeg_rk1.sh` inside the container to install it manually.
-3. **Enable the startup guard** – set `MEDIA_ENGINE_REQUIRE_RKMPP=true` (and optionally point `MEDIA_ENGINE_FFMPEG_COMMAND` to the hardware-enabled binary). The self-test will fail if RKMPP decoders are missing so you catch misconfiguration early.
+3. **Enable the startup guard** – set `MEDIA_ENGINE_REQUIRE_RK_ACCEL=true` (and optionally point `MEDIA_ENGINE_FFMPEG_COMMAND` to the hardware-enabled binary). Consider `MEDIA_ENGINE_ALLOW_CPU_FALLBACK=false` if you want hardware failures to abort instead of silently falling back to software. The self-test will fail if RKMPP decoders are missing so you catch misconfiguration early.
 
 The default image continues to work on generic CPUs without this setup; the guard only triggers when you opt in via the environment variable.
 
