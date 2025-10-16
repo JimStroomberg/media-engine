@@ -378,10 +378,15 @@ class TranscodeEngine:
                 rga_filter += f",pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2"
             filter_candidates.append(("scale_rkrga", rga_filter))
 
-        fallback_filter = f"scale={scaled_w}:{scaled_h},format=nv12"
+        fallback_ops: List[str] = []
+        if decoder_name:
+            fallback_ops.extend(["hwdownload", "format=nv12"])
+        fallback_ops.append(f"scale={scaled_w}:{scaled_h}")
         if target_w != scaled_w or target_h != scaled_h:
-            fallback_filter += f",pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2"
-        filter_candidates.append(("format", fallback_filter))
+            fallback_ops.append(f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2")
+        fallback_ops.append("format=nv12")
+        fallback_ops.append("hwupload")
+        filter_candidates.append(("format", ",".join(fallback_ops)))
 
         decoder_args: List[str] = []
         if decoder_name:
