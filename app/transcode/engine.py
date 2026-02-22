@@ -372,12 +372,8 @@ class TranscodeEngine:
         target_w, target_h = profile.width, profile.height
 
         filter_candidates: list[Tuple[str, str]] = []
-        if Path("/dev/rga").exists():
-            rga_filter = f"scale_rkrga={scaled_w}:{scaled_h}:format=nv12"
-            if target_w != scaled_w or target_h != scaled_h:
-                rga_filter += f",pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2"
-            filter_candidates.append(("scale_rkrga", rga_filter))
-
+        # Keep a broadly compatible RKMPP path: this filter chain works across
+        # current RK1 ffmpeg packages where scale_rkrga format negotiation may fail.
         fallback_filter = f"scale={scaled_w}:{scaled_h},format=nv12"
         if target_w != scaled_w or target_h != scaled_h:
             fallback_filter += f",pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2"
@@ -385,7 +381,7 @@ class TranscodeEngine:
 
         decoder_args: List[str] = []
         if decoder_name:
-            decoder_args = ["-hwaccel", "rkmpp", "-hwaccel_output_format", "drm_prime", "-c:v", decoder_name]
+            decoder_args = ["-hwaccel", "rkmpp", "-c:v", decoder_name]
 
         base_cmd = [
             self.settings.ffmpeg_command,
