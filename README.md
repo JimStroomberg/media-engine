@@ -73,11 +73,13 @@ Environment variables (prefixed with `MEDIA_ENGINE_`):
 | `MEDIA_ENGINE_OUTPUT_DIR` | `/data/output` | Completed artifacts |
 | `MEDIA_ENGINE_SELF_TEST_ON_STARTUP` | `true` | Toggle the boot self-test |
 | `MEDIA_ENGINE_MAX_QUEUE_SIZE` | `50` | Maximum queued jobs |
+| `MEDIA_ENGINE_MAX_UPLOAD_BYTES` | unset | Optional hard upload-size limit; requests above this return HTTP 413 |
 | `MEDIA_ENGINE_JOB_RETENTION_MINUTES` | `120` | Minutes to keep completed job metadata and files |
 | `MEDIA_ENGINE_CALLBACK_TIMEOUT_SECONDS` | `10` | Timeout per webhook attempt |
 | `MEDIA_ENGINE_CALLBACK_MAX_ATTEMPTS` | `3` | Delivery retries |
 | `MEDIA_ENGINE_ALLOW_CPU_FALLBACK` | `true` | Permit CPU video fallback when hardware encoding fails (set `false` on RK1 to fail fast) |
 | `MEDIA_ENGINE_REQUIRE_RK_ACCEL` | `false` | Fail startup when RKMPP hardware acceleration is expected but missing |
+| `MEDIA_ENGINE_FFPROBE_TIMEOUT_SECONDS` | `30` | Maximum time allowed for media probing |
 
 Quality profiles live in `app/transcode/profiles.py`; adjust widths/bitrates or add new presets as needed.
 

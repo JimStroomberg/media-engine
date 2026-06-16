@@ -22,14 +22,15 @@ class CallbackDispatcher:
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=self.timeout)
+            timeout = httpx.Timeout(self.timeout, connect=min(self.timeout, 5))
+            self._client = httpx.AsyncClient(timeout=timeout)
         return self._client
 
     async def dispatch(self, url: str, payload) -> None:
         client = await self._get_client()
         for attempt in range(1, self.max_attempts + 1):
             try:
-                response = await client.post(url, json=payload.dict())
+                response = await client.post(url, json=payload.model_dump(mode="json"))
                 response.raise_for_status()
                 logger.info("Callback delivered", extra={"url": url})
                 return
@@ -38,7 +39,8 @@ class CallbackDispatcher:
                     "Callback attempt failed",
                     extra={"url": url, "attempt": attempt, "error": str(exc)},
                 )
-                await asyncio.sleep(min(2 ** attempt, 30))
+                if attempt < self.max_attempts:
+                    await asyncio.sleep(min(2 ** attempt, 30))
         logger.error("Callback delivery exhausted", extra={"url": url})
 
     async def shutdown(self) -> None:

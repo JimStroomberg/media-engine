@@ -21,10 +21,18 @@ from .models import (
     JobStatus,
     QualityTarget,
 )
-from .transcode.engine import TranscodeEngine, TranscodeResult
+from .transcode.engine import TranscodeCancelled, TranscodeEngine, TranscodeResult
 from .utils.callbacks import CallbackDispatcher
 
 logger = logging.getLogger(__name__)
+
+
+class QueueFullError(RuntimeError):
+    pass
+
+
+class UploadTooLargeError(RuntimeError):
+    pass
 
 
 @dataclass
@@ -48,6 +56,7 @@ class JobRecord:
     transcode_media_seconds: Optional[float] = None
     source_width: Optional[int] = None
     source_height: Optional[int] = None
+    cancel_requested: bool = False
 
     def to_detail(self) -> JobDetail:
         now = datetime.utcnow()
@@ -133,6 +142,10 @@ class JobManager:
         self.maintenance_task = None
 
     async def submit_job(self, upload: UploadFile, request: JobRequest) -> JobResponse:
+        if self.queue.full():
+            await upload.close()
+            raise QueueFullError("Job queue is full")
+
         job_id = str(uuid.uuid4())
         timestamp = datetime.utcnow()
         original_name = Path(upload.filename or "upload").name
@@ -164,7 +177,13 @@ class JobManager:
         )
         self.records[job_id] = record
 
-        await self.queue.put(WorkItem(record=record, request=request))
+        try:
+            self.queue.put_nowait(WorkItem(record=record, request=request))
+        except asyncio.QueueFull as exc:
+            self.records.pop(job_id, None)
+            with contextlib.suppress(FileNotFoundError):
+                dest_path.unlink()
+            raise QueueFullError("Job queue is full") from exc
         queue_depth = self.queue.qsize()
         logger.info("Job queued", extra={"job_id": job_id, "queue_depth": queue_depth})
 
@@ -183,6 +202,7 @@ class JobManager:
             return False
         if record.status in {JobStatus.completed, JobStatus.failed, JobStatus.cancelled}:
             return False
+        record.cancel_requested = True
         record.status = JobStatus.cancelled
         record.updated_at = datetime.utcnow()
         return True
@@ -230,11 +250,26 @@ class JobManager:
                 record.transcode_started_at = datetime.utcnow()
                 result: TranscodeResult = await self.transcoder.process(record, work_item.request)
                 record.transcode_finished_at = datetime.utcnow()
+                if record.cancel_requested or record.status == JobStatus.cancelled:
+                    with contextlib.suppress(FileNotFoundError):
+                        result.output_path.unlink()
+                    record.status = JobStatus.cancelled
+                    record.updated_at = datetime.utcnow()
+                    logger.info("Job cancelled", extra={"job_id": record.job_id})
+                    await self._fire_callback(record, message="cancelled")
+                    continue
                 record.output_path = result.output_path
                 record.status = JobStatus.completed
                 record.updated_at = datetime.utcnow()
                 logger.info("Job completed", extra={"job_id": record.job_id, "output": str(result.output_path)})
                 await self._fire_callback(record, message="completed")
+            except TranscodeCancelled:
+                logger.info("Job cancelled", extra={"job_id": record.job_id})
+                record.status = JobStatus.cancelled
+                record.updated_at = datetime.utcnow()
+                if not record.transcode_finished_at and record.transcode_started_at:
+                    record.transcode_finished_at = datetime.utcnow()
+                await self._fire_callback(record, message="cancelled")
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Job failed", extra={"job_id": record.job_id})
                 record.status = JobStatus.failed
@@ -259,10 +294,21 @@ class JobManager:
 
     async def _persist_upload(self, upload: UploadFile, dest_path: Path) -> None:
         dest_path.parent.mkdir(parents=True, exist_ok=True)
-        with dest_path.open("wb") as out_file:
-            while True:
-                chunk = await upload.read(1024 * 1024)
-                if not chunk:
-                    break
-                out_file.write(chunk)
-        await upload.close()
+        total_bytes = 0
+        try:
+            with dest_path.open("wb") as out_file:
+                while True:
+                    chunk = await upload.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    total_bytes += len(chunk)
+                    if self.settings.max_upload_bytes is not None and total_bytes > self.settings.max_upload_bytes:
+                        out_file.close()
+                        with contextlib.suppress(FileNotFoundError):
+                            dest_path.unlink()
+                        raise UploadTooLargeError(
+                            f"Upload exceeds MEDIA_ENGINE_MAX_UPLOAD_BYTES={self.settings.max_upload_bytes}"
+                        )
+                    out_file.write(chunk)
+        finally:
+            await upload.close()

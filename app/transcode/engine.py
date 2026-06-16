@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import select
 import shutil
 import subprocess
 from datetime import datetime
@@ -10,7 +11,7 @@ from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Tuple
 
 from ..config import get_settings
-from ..models import CodecPreference, JobRequest, QualityTarget
+from ..models import CodecPreference, JobRequest, JobStatus, QualityTarget
 from ..transcode.probe import MediaInfo, ProbeError, probe_media
 from ..transcode.profiles import QualityProfile, choose_profile
 
@@ -23,6 +24,10 @@ class TranscodeResult:
     remuxed: bool
     profile: Optional[QualityProfile]
     codec: CodecPreference
+
+
+class TranscodeCancelled(RuntimeError):
+    pass
 
 
 class TranscodeEngine:
@@ -91,7 +96,7 @@ class TranscodeEngine:
 
         if self._should_remux(info, profile, target_codec):
             logger.info("Selected remux path", extra={"job_id": job_id})
-            self._remux(source_path, work_output)
+            self._remux(record, source_path, work_output)
             remuxed = True
         else:
             use_hw, decoder, encoder = self._select_rkmpp_codecs(info, target_codec)
@@ -268,7 +273,7 @@ class TranscodeEngine:
         )
         return TranscodeResult(output_path=output_path, remuxed=False, profile=None, codec=CodecPreference.auto)
 
-    def _remux(self, source_path: Path, dest_path: Path) -> None:
+    def _remux(self, record, source_path: Path, dest_path: Path) -> None:
         cmd = [
             self.settings.ffmpeg_command,
             "-hide_banner",
@@ -283,7 +288,7 @@ class TranscodeEngine:
             "+faststart",
             str(dest_path),
         ]
-        self._run_ffmpeg(cmd, action="remux")
+        self._run_ffmpeg(cmd, action="remux", should_cancel=lambda: self._is_cancelled(record))
 
     def _transcode_audio(
         self,
@@ -313,6 +318,7 @@ class TranscodeEngine:
             cmd,
             action="extract-audio",
             progress_handler=lambda seconds: self._update_progress(record, seconds, duration),
+            should_cancel=lambda: self._is_cancelled(record),
         )
 
     def _transcode_cpu(
@@ -357,6 +363,7 @@ class TranscodeEngine:
             cmd,
             action="transcode",
             progress_handler=lambda seconds: self._update_progress(record, seconds, duration),
+            should_cancel=lambda: self._is_cancelled(record),
         )
 
     def _transcode_rkmpp(
@@ -426,6 +433,7 @@ class TranscodeEngine:
                     cmd,
                     action=f"transcode-rkmpp-{label}",
                     progress_handler=lambda seconds: self._update_progress(record, seconds, duration),
+                    should_cancel=lambda: self._is_cancelled(record),
                 )
                 return
             except RuntimeError as exc:
@@ -472,44 +480,82 @@ class TranscodeEngine:
         action: str,
         env: dict[str, str] | None = None,
         progress_handler: Optional[Callable[[float], None]] = None,
+        should_cancel: Optional[Callable[[], bool]] = None,
     ) -> None:
         logger.info("Running ffmpeg", extra={"action": action, "command": " ".join(cmd)})
         wrapped_cmd = [cmd[0], "-progress", "pipe:1", "-nostats"] + cmd[1:]
         process = subprocess.Popen(
             wrapped_cmd,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
             env=env,
         )
-        stderr_data = ""
+        output_lines: list[str] = []
         try:
+            while process.poll() is None:
+                if should_cancel and should_cancel():
+                    self._terminate_process(process, action)
+                    raise TranscodeCancelled(f"ffmpeg {action} cancelled")
+
+                if not process.stdout:
+                    continue
+
+                ready, _, _ = select.select([process.stdout], [], [], 1.0)
+                if not ready:
+                    continue
+
+                line = process.stdout.readline()
+                if not line:
+                    continue
+                self._handle_ffmpeg_output_line(line, output_lines, progress_handler)
+
             if process.stdout:
                 for line in process.stdout:
-                    if progress_handler and line.startswith("out_time_ms="):
-                        try:
-                            microseconds = int(line.strip().split("=", 1)[1])
-                            seconds = microseconds / 1_000_000
-                            progress_handler(seconds)
-                        except ValueError:
-                            continue
-            if process.stderr:
-                stderr_data = process.stderr.read()
+                    self._handle_ffmpeg_output_line(line, output_lines, progress_handler)
             return_code = process.wait()
         finally:
             if process.stdout:
                 process.stdout.close()
-            if process.stderr:
-                process.stderr.close()
 
         if return_code != 0:
+            output_data = "".join(output_lines[-80:])
             logger.error(
                 "ffmpeg command failed (%s): %s",
                 action,
-                stderr_data.strip(),
-                extra={"action": action, "stderr": stderr_data},
+                output_data.strip(),
+                extra={"action": action, "ffmpeg_output": output_data},
             )
             raise RuntimeError(f"ffmpeg {action} failed")
+
+    def _handle_ffmpeg_output_line(
+        self,
+        line: str,
+        output_lines: list[str],
+        progress_handler: Optional[Callable[[float], None]],
+    ) -> None:
+        if progress_handler and line.startswith("out_time_ms="):
+            try:
+                microseconds = int(line.strip().split("=", 1)[1])
+                seconds = microseconds / 1_000_000
+                progress_handler(seconds)
+            except ValueError:
+                return
+        elif not line.startswith(("frame=", "fps=", "stream_", "progress=", "bitrate=", "total_size=", "out_time_")):
+            output_lines.append(line)
+
+    def _terminate_process(self, process: subprocess.Popen[str], action: str) -> None:
+        logger.info("Terminating ffmpeg", extra={"action": action})
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            logger.warning("Killing unresponsive ffmpeg", extra={"action": action})
+            process.kill()
+            process.wait(timeout=10)
+
+    def _is_cancelled(self, record) -> bool:
+        return bool(getattr(record, "cancel_requested", False) or getattr(record, "status", None) == JobStatus.cancelled)
 
     def _query_ffmpeg_list(self, list_type: str) -> set[str]:
         ffmpeg = shutil.which(self.settings.ffmpeg_command)
@@ -522,8 +568,9 @@ class TranscodeEngine:
                 check=True,
                 capture_output=True,
                 text=True,
+                timeout=self.settings.ffprobe_timeout_seconds,
             )
-        except subprocess.CalledProcessError:
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             return set()
         names: set[str] = set()
         for line in result.stdout.splitlines():

@@ -5,11 +5,17 @@ from pathlib import Path
 from typing import Optional, Union
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     """Application runtime configuration."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="MEDIA_ENGINE_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+    )
 
     app_name: str = Field("media-engine", description="Service identifier")
     api_host: str = Field("0.0.0.0", description="Interface for the API server")
@@ -22,6 +28,7 @@ class Settings(BaseSettings):
     temp_dir: Path = Field(Path("/tmp/media-engine"), description="Temporary directory for probes")
 
     max_queue_size: int = Field(50, description="Maximum number of queued jobs")
+    max_upload_bytes: Optional[int] = Field(None, description="Reject uploads larger than this many bytes")
     job_retention_minutes: int = Field(120, description="How long to keep completed job metadata")
 
     callback_timeout_seconds: int = Field(10, description="HTTP timeout for webhook callbacks")
@@ -34,13 +41,9 @@ class Settings(BaseSettings):
 
     ffmpeg_command: str = Field("ffmpeg", description="Executable used for media transcoding")
     ffprobe_command: str = Field("ffprobe", description="Executable used for media probing")
+    ffprobe_timeout_seconds: int = Field(30, description="Maximum time to wait for ffprobe")
 
     require_rk_accel: bool = Field(False, description="Fail startup when RKMPP hardware acceleration is expected but missing")
-
-    class Config:
-        env_prefix = "MEDIA_ENGINE_"
-        env_file = ".env"
-        env_file_encoding = "utf-8"
 
     @field_validator("input_dir", "work_dir", "output_dir", mode="before")
     def _expand_path(cls, value: Union[Path, str]) -> Path:

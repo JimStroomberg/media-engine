@@ -45,9 +45,17 @@ def probe_media(path: Path) -> MediaInfo:
     ]
 
     try:
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        result = subprocess.run(
+            cmd,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=settings.ffprobe_timeout_seconds,
+        )
     except (FileNotFoundError, subprocess.CalledProcessError) as exc:  # noqa: BLE001
         raise ProbeError(f"Failed to probe media: {exc}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise ProbeError(f"Media probe exceeded {settings.ffprobe_timeout_seconds}s timeout") from exc
 
     payload = json.loads(result.stdout or "{}")
     streams = payload.get("streams", [])

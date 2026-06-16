@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 import logging
 from typing import Dict, Optional
 
@@ -7,7 +8,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
 from .config import Settings, get_settings
-from .jobs import JobManager
+from .jobs import JobManager, QueueFullError, UploadTooLargeError
 from .models import CodecPreference, JobDetail, JobListResponse, JobRequest, JobResponse, QualityTarget
 from .selftest import SelfTestFailure, run_self_tests
 from .transcode.engine import TranscodeEngine
@@ -16,23 +17,9 @@ from .utils.callbacks import CallbackDispatcher
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-app = FastAPI(title="Media Engine", version="0.1.0")
 
-
-def get_job_manager() -> JobManager:
-    return app.state.job_manager
-
-
-def get_callbacks() -> CallbackDispatcher:
-    return app.state.callbacks
-
-
-def get_transcoder() -> TranscodeEngine:
-    return app.state.transcoder
-
-
-@app.on_event("startup")
-async def startup_event() -> None:
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     settings = get_settings()
     app.state.settings = settings
     app.state.callbacks = CallbackDispatcher()
@@ -48,14 +35,28 @@ async def startup_event() -> None:
             raise
 
     await app.state.job_manager.start()
+    try:
+        yield
+    finally:
+        job_manager: JobManager = app.state.job_manager
+        callbacks: CallbackDispatcher = app.state.callbacks
+        await job_manager.stop()
+        await callbacks.shutdown()
 
 
-@app.on_event("shutdown")
-async def shutdown_event() -> None:
-    job_manager: JobManager = app.state.job_manager
-    callbacks: CallbackDispatcher = app.state.callbacks
-    await job_manager.stop()
-    await callbacks.shutdown()
+app = FastAPI(title="Media Engine", version="0.1.0", lifespan=lifespan)
+
+
+def get_job_manager() -> JobManager:
+    return app.state.job_manager
+
+
+def get_callbacks() -> CallbackDispatcher:
+    return app.state.callbacks
+
+
+def get_transcoder() -> TranscodeEngine:
+    return app.state.transcoder
 
 
 @app.get("/healthz")
@@ -72,7 +73,12 @@ async def submit_job(
     job_manager: JobManager = Depends(get_job_manager),
 ) -> JobResponse:
     job_request = JobRequest(quality=quality, codec=codec, callback_url=callback_url)
-    return await job_manager.submit_job(file, job_request)
+    try:
+        return await job_manager.submit_job(file, job_request)
+    except QueueFullError as exc:
+        raise HTTPException(status_code=503, detail=str(exc), headers={"Retry-After": "30"}) from exc
+    except UploadTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
 
 
 @app.get("/jobs", response_model=JobListResponse)
@@ -94,7 +100,8 @@ async def download_job(job_id: str, job_manager: JobManager = Depends(get_job_ma
     job = await job_manager.get_job(job_id)
     if not job or not job.output_path:
         raise HTTPException(status_code=404, detail="Job output not ready")
-    return FileResponse(path=job.output_path, filename=job.output_path.name, media_type="video/mp4")
+    media_type = "audio/mp4" if job.output_path.suffix == ".m4a" else "video/mp4"
+    return FileResponse(path=job.output_path, filename=job.output_path.name, media_type=media_type)
 
 
 @app.delete("/jobs/{job_id}")

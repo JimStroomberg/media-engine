@@ -58,7 +58,7 @@ def run_self_tests() -> List[SelfTestResult]:
             "-",
         ]
         try:
-            subprocess.run(test_cmd, check=True, capture_output=True)
+            subprocess.run(test_cmd, check=True, capture_output=True, timeout=settings.ffprobe_timeout_seconds)
             results.append(SelfTestResult(description="ffmpeg test pattern encode", passed=True))
         except subprocess.CalledProcessError as exc:  # noqa: BLE001
             detail = (exc.stderr or b"").decode(errors="ignore")
@@ -69,12 +69,26 @@ def run_self_tests() -> List[SelfTestResult]:
                     detail=detail or "ffmpeg encode test failed",
                 )
             )
+        except subprocess.TimeoutExpired:
+            results.append(
+                SelfTestResult(
+                    description="ffmpeg test pattern encode",
+                    passed=False,
+                    detail=f"ffmpeg encode test exceeded {settings.ffprobe_timeout_seconds}s timeout",
+                )
+            )
 
     if settings.require_rk_accel:
         ffmpeg = shutil.which(settings.ffmpeg_command)
         if ffmpeg:
             try:
-                decoders = subprocess.run([ffmpeg, '-hide_banner', '-loglevel', 'quiet', '-decoders'], check=True, capture_output=True, text=True).stdout.lower()
+                decoders = subprocess.run(
+                    [ffmpeg, '-hide_banner', '-loglevel', 'quiet', '-decoders'],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=settings.ffprobe_timeout_seconds,
+                ).stdout.lower()
             except subprocess.CalledProcessError as exc:  # noqa: BLE001
                 detail = (exc.stderr or b'').decode(errors='ignore')
                 results.append(
@@ -82,6 +96,14 @@ def run_self_tests() -> List[SelfTestResult]:
                         description='ffmpeg rk acceleration probe',
                         passed=False,
                         detail=detail or 'Unable to query ffmpeg decoders',
+                    )
+                )
+            except subprocess.TimeoutExpired:
+                results.append(
+                    SelfTestResult(
+                        description='ffmpeg rk acceleration probe',
+                        passed=False,
+                        detail=f"ffmpeg decoder query exceeded {settings.ffprobe_timeout_seconds}s timeout",
                     )
                 )
             else:
