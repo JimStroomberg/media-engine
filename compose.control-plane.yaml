@@ -1,0 +1,5 @@
+services:
+  # Apply this overlay when all processing is performed by separately deployed workers.
+  # The service remains available through the "local-worker" profile for emergency fallback.
+  worker-cpu:
+    profiles: ["local-worker"]

@@ -1,0 +1,69 @@
+services:
+  api:
+    environment:
+      MEDIA_ENGINE_TRANSCODE_REQUIRED_BACKEND: rkmpp
+
+  worker-cpu:
+    profiles: ["cpu-fallback"]
+
+  worker-rk1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # The Rockchip multimedia PPA currently publishes only for Ubuntu 24.04 and 22.04.
+        BASE_IMAGE: ubuntu:24.04
+        RK_VARIANT: "true"
+    restart: unless-stopped
+    privileged: true
+    depends_on:
+      api:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      MEDIA_ENGINE_S3_ENDPOINT_URL: http://minio:9000
+      MEDIA_ENGINE_S3_PUBLIC_ENDPOINT_URL: ${MEDIA_ENGINE_S3_PUBLIC_ENDPOINT_URL:-http://localhost:9000}
+      MEDIA_ENGINE_S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-media-engine}
+      MEDIA_ENGINE_S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD}
+      MEDIA_ENGINE_S3_BUCKET: ${MEDIA_ENGINE_S3_BUCKET:-media-engine}
+      MEDIA_ENGINE_S3_REGION: ${MEDIA_ENGINE_S3_REGION:-us-east-1}
+      MEDIA_ENGINE_S3_FORCE_PATH_STYLE: "true"
+      MEDIA_ENGINE_WORKER_API_URL: http://api:8080
+      MEDIA_ENGINE_WORKER_API_TOKEN: ${MEDIA_ENGINE_WORKER_API_TOKEN:?Set MEDIA_ENGINE_WORKER_API_TOKEN}
+      MEDIA_ENGINE_WORKER_KEY: ${MEDIA_ENGINE_RK1_WORKER_KEY:-worker-rk1-1}
+      MEDIA_ENGINE_WORKER_DISPLAY_NAME: ${MEDIA_ENGINE_RK1_WORKER_DISPLAY_NAME:-Rockchip RK1 worker}
+      MEDIA_ENGINE_WORKER_BACKEND: rkmpp
+      MEDIA_ENGINE_WORKER_HEARTBEAT_SECONDS: ${MEDIA_ENGINE_WORKER_HEARTBEAT_SECONDS:-20}
+      MEDIA_ENGINE_WORKER_POLL_SECONDS: ${MEDIA_ENGINE_WORKER_POLL_SECONDS:-2}
+      MEDIA_ENGINE_SELF_TEST_ON_STARTUP: "true"
+      MEDIA_ENGINE_REQUIRE_RK_ACCEL: "true"
+      MEDIA_ENGINE_ALLOW_CPU_FALLBACK: "false"
+      MEDIA_ENGINE_INPUT_DIR: /worker/input
+      MEDIA_ENGINE_WORK_DIR: /worker/work
+      MEDIA_ENGINE_OUTPUT_DIR: /worker/output
+      MEDIA_ENGINE_TEMP_DIR: /worker/temp
+    volumes:
+      - worker-rk1-scratch:/worker
+      - /usr/lib/aarch64-linux-gnu/dri:/usr/lib/aarch64-linux-gnu/dri:ro
+      - /usr/lib/aarch64-linux-gnu/rga:/usr/lib/aarch64-linux-gnu/rga:ro
+      - /usr/lib/aarch64-linux-gnu/mpp:/usr/lib/aarch64-linux-gnu/mpp:ro
+    devices:
+      - /dev/dri:/dev/dri
+      - /dev/mpp_service:/dev/mpp_service
+      - /dev/rga:/dev/rga
+      - /dev/dma_heap:/dev/dma_heap
+    device_cgroup_rules:
+      - "c 199:* rmw"
+      - "c 29:* rmw"
+      - "c 226:* rmw"
+      - "c 240:* rmw"
+    security_opt:
+      - seccomp:unconfined
+    cap_add:
+      - SYS_ADMIN
+      - SYS_RAWIO
+    command: ["python", "-m", "app.worker"]
+
+volumes:
+  worker-rk1-scratch:

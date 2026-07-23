@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Media Engine · Control room</title>
+  <link rel="stylesheet" href="/admin/assets/styles.css">
+  <script src="/admin/assets/app.js" defer></script>
+</head>
+<body>
+  <main id="login-view" class="login-shell">
+    <section class="login-card" aria-labelledby="login-title">
+      <div class="brand-mark" aria-hidden="true"><span>ME</span></div>
+      <p class="eyebrow">Media Engine</p>
+      <h1 id="login-title">Open the control room</h1>
+      <p class="login-copy">Use the administrator credentials from your deployment configuration.</p>
+      <form id="login-form" class="stack-form">
+        <label>
+          <span>Username</span>
+          <input name="username" autocomplete="username" required autofocus>
+        </label>
+        <label>
+          <span>Password</span>
+          <input name="password" type="password" autocomplete="current-password" required>
+        </label>
+        <button class="button primary wide" type="submit">Sign in</button>
+      </form>
+      <p id="login-error" class="form-error" role="alert" hidden></p>
+      <div class="login-footnote"><span class="status-dot"></span> Local management connection</div>
+    </section>
+  </main>
+
+  <div id="app-view" class="app-shell" hidden>
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-brand">
+        <div class="brand-mark compact" aria-hidden="true"><span>ME</span></div>
+        <div><strong>Media Engine</strong><small>Control room</small></div>
+      </div>
+      <nav class="primary-nav" aria-label="Management">
+        <button class="nav-item active" data-view="overview"><span class="nav-symbol">⌂</span>Overview</button>
+        <button class="nav-item" data-view="jobs"><span class="nav-symbol">▤</span>Jobs</button>
+        <button class="nav-item" data-view="workers"><span class="nav-symbol">⌁</span>Workers</button>
+        <button class="nav-item" data-view="providers"><span class="nav-symbol">✦</span>AI providers</button>
+        <button class="nav-item" data-view="clients"><span class="nav-symbol">◎</span>Clients &amp; keys</button>
+        <button class="nav-item" data-view="webhooks"><span class="nav-symbol">↗</span>Webhooks</button>
+        <button class="nav-item" data-view="usage"><span class="nav-symbol">◒</span>Usage &amp; cost</button>
+      </nav>
+      <div class="sidebar-footer">
+        <div class="connection-state"><span class="status-dot"></span><div><strong>Platform ready</strong><small id="session-user">Administrator</small></div></div>
+        <button id="logout-button" class="text-button">Sign out</button>
+      </div>
+    </aside>
+
+    <div class="workspace">
+      <header class="topbar">
+        <button id="menu-button" class="icon-button mobile-only" aria-label="Open navigation">☰</button>
+        <div>
+          <p class="eyebrow" id="page-kicker">System</p>
+          <h1 id="page-title">Overview</h1>
+        </div>
+        <div class="topbar-actions">
+          <span id="last-updated" class="last-updated"></span>
+          <button id="refresh-button" class="button secondary">Refresh</button>
+        </div>
+      </header>
+
+      <main class="content" id="content">
+        <section class="view active" id="view-overview" aria-labelledby="page-title">
+          <div id="overview-metrics" class="metric-grid loading-grid"></div>
+          <div class="dashboard-grid">
+            <article class="panel span-2">
+              <div class="panel-head"><div><p class="eyebrow">Latest activity</p><h2>Recent jobs</h2></div><button class="text-button" data-view="jobs">View all</button></div>
+              <div id="overview-jobs" class="table-wrap"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-head"><div><p class="eyebrow">Execution</p><h2>Worker fleet</h2></div><button class="text-button" data-view="workers">Details</button></div>
+              <div id="overview-workers" class="card-list"></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="view" id="view-jobs">
+          <div class="toolbar panel compact-panel">
+            <label><span>Status</span><select id="job-status-filter"><option value="">All statuses</option><option>queued</option><option>running</option><option>completed</option><option>failed</option></select></label>
+            <label><span>Pipeline</span><select id="job-pipeline-filter"><option value="">All pipelines</option><option value="understand">Understand</option><option value="ai_prepare">AI prepare</option><option value="transcode">Transcode</option></select></label>
+            <label><span>Client</span><select id="job-client-filter"><option value="">All clients</option></select></label>
+            <div class="toolbar-summary" id="job-count"></div>
+          </div>
+          <article class="panel table-panel"><div id="jobs-table" class="table-wrap"></div></article>
+        </section>
+
+        <section class="view" id="view-workers">
+          <div class="section-intro"><div><p class="eyebrow">Capability-aware execution</p><h2>Worker fleet</h2><p>Live heartbeat, hardware capabilities, and active leases.</p></div></div>
+          <div id="workers-grid" class="worker-grid"></div>
+        </section>
+
+        <section class="view" id="view-providers">
+          <div class="section-intro"><div><p class="eyebrow">Model connections</p><h2>AI providers</h2><p>Credentials stay encrypted and are only released for claimed stages.</p></div><button class="button primary" id="add-provider-button">Add provider</button></div>
+          <div id="providers-grid" class="card-grid"></div>
+        </section>
+
+        <section class="view" id="view-clients">
+          <div class="section-intro"><div><p class="eyebrow">Product access</p><h2>Clients &amp; API keys</h2><p>Keep each product isolated with scoped, revocable credentials.</p></div><button class="button primary" id="add-client-button">Add client</button></div>
+          <div class="split-layout">
+            <article class="panel"><div class="panel-head"><h2>Client projects</h2></div><div id="clients-list" class="selection-list"></div></article>
+            <article class="panel"><div id="client-detail" class="empty-state"><h3>Select a client</h3><p>API keys and access details will appear here.</p></div></article>
+          </div>
+        </section>
+
+        <section class="view" id="view-webhooks">
+          <div class="section-intro"><div><p class="eyebrow">Event delivery</p><h2>Webhooks</h2><p>Signed terminal notifications with durable retry history.</p></div><button class="button primary" id="add-webhook-button">Add endpoint</button></div>
+          <div class="toolbar panel compact-panel"><label><span>Client</span><select id="webhook-client-filter"></select></label><div class="toolbar-summary">Polling remains available when delivery fails.</div></div>
+          <div id="webhook-endpoints" class="card-grid"></div>
+          <article class="panel table-panel"><div class="panel-head"><div><p class="eyebrow">Delivery log</p><h2>Recent events</h2></div></div><div id="webhook-events" class="table-wrap"></div></article>
+        </section>
+
+        <section class="view" id="view-usage">
+          <div class="section-intro"><div><p class="eyebrow">Provider accounting</p><h2>Usage &amp; cost</h2><p>Every provider response, including attempts that later fail validation.</p></div></div>
+          <div class="toolbar panel compact-panel"><label><span>Provider</span><select id="usage-provider-filter"><option value="">All providers</option><option value="xai">xAI</option><option value="openai">OpenAI</option></select></label><div id="usage-summary" class="toolbar-summary"></div></div>
+          <article class="panel table-panel"><div id="usage-table" class="table-wrap"></div></article>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <dialog id="form-dialog" class="dialog">
+    <div class="dialog-head"><div><p class="eyebrow" id="form-dialog-kicker">Configure</p><h2 id="form-dialog-title">Edit</h2></div><button class="icon-button" data-close-dialog="form-dialog" aria-label="Close">×</button></div>
+    <form id="dynamic-form" class="stack-form dialog-body"></form>
+  </dialog>
+
+  <dialog id="secret-dialog" class="dialog secret-dialog">
+    <div class="dialog-head"><div><p class="eyebrow">Shown once</p><h2 id="secret-title">Save this secret</h2></div><button class="icon-button" data-close-dialog="secret-dialog" aria-label="Close">×</button></div>
+    <div class="dialog-body"><p id="secret-copy" class="muted"></p><code id="secret-value" class="secret-value"></code><div class="dialog-actions"><button id="copy-secret-button" class="button primary">Copy secret</button><button class="button secondary" data-close-dialog="secret-dialog">Done</button></div></div>
+  </dialog>
+
+  <dialog id="detail-dialog" class="dialog detail-dialog">
+    <div class="dialog-head"><div><p class="eyebrow">Job inspection</p><h2 id="detail-title">Job details</h2></div><button class="icon-button" data-close-dialog="detail-dialog" aria-label="Close">×</button></div>
+    <div id="detail-content" class="dialog-body"></div>
+  </dialog>
+
+  <div id="toast-region" class="toast-region" aria-live="polite"></div>
+</body>
+</html>

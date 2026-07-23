@@ -1,5 +1,6 @@
 # syntax=docker/dockerfile:1
-FROM ubuntu:24.04
+ARG BASE_IMAGE=ubuntu:26.04
+FROM ${BASE_IMAGE}
 
 ARG RK_VARIANT=false
 
@@ -15,7 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     add-apt-repository -y ppa:jjriek/rockchip-multimedia; \
  fi \
  && apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg \
+    ffmpeg tesseract-ocr \
  && if [ "${RK_VARIANT}" = "true" ]; then \
     apt-get install -y --no-install-recommends librga2 libdrm2; \
  fi \
@@ -27,11 +28,12 @@ RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
 
 WORKDIR /app
-COPY requirements.txt ./
-RUN pip install --upgrade pip && pip install --upgrade -r requirements.txt
-
+COPY pyproject.toml README.md ./
 COPY app ./app
-COPY README.md ./README.md
+RUN pip install --upgrade pip && pip install --upgrade .
+
+COPY alembic.ini ./alembic.ini
+COPY migrations ./migrations
 
 ENV MEDIA_ENGINE_DATA_ROOT=/data \
     MEDIA_ENGINE_INPUT_DIR=/data/input \
