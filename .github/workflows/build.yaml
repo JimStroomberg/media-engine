@@ -101,7 +101,7 @@ jobs:
       # --- Connect to Docker Build Cloud ---
       - name: Set up Docker Buildx (Docker Build Cloud)
         if: ${{ steps.ctx.outputs.is_fork_pr != 'true' }}
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
         with:
           driver: cloud
           endpoint: "jimstro/builder1" # <user-or-org>/<builder-name> from Docker Hub
@@ -113,7 +113,7 @@ jobs:
 
       - name: Set up Docker Buildx (local) for forked PR
         if: ${{ steps.ctx.outputs.is_fork_pr == 'true' }}
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       # --- Compute tags for BASE images ---
       - name: Compute tagging (BASE)
