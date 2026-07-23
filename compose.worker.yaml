@@ -1,0 +1,33 @@
+name: media-engine-worker
+
+services:
+  worker:
+    image: ${MEDIA_ENGINE_WORKER_IMAGE:-jimstro/media-engine:latest}
+    pull_policy: ${MEDIA_ENGINE_WORKER_PULL_POLICY:-always}
+    restart: unless-stopped
+    environment:
+      MEDIA_ENGINE_WORKER_API_URL: ${MEDIA_ENGINE_WORKER_API_URL:?Set the HTTPS control-plane URL}
+      MEDIA_ENGINE_WORKER_API_TOKEN: ${MEDIA_ENGINE_WORKER_API_TOKEN:?Set the shared worker API token}
+      MEDIA_ENGINE_WORKER_KEY: ${MEDIA_ENGINE_WORKER_KEY:?Set a unique stable worker key}
+      MEDIA_ENGINE_WORKER_DISPLAY_NAME: ${MEDIA_ENGINE_WORKER_DISPLAY_NAME:?Set a worker display name}
+      MEDIA_ENGINE_WORKER_BACKEND: cpu
+      MEDIA_ENGINE_WORKER_HEARTBEAT_SECONDS: ${MEDIA_ENGINE_WORKER_HEARTBEAT_SECONDS:-20}
+      MEDIA_ENGINE_WORKER_POLL_SECONDS: ${MEDIA_ENGINE_WORKER_POLL_SECONDS:-2}
+      MEDIA_ENGINE_S3_ENDPOINT_URL: ${MEDIA_ENGINE_S3_ENDPOINT_URL:-}
+      MEDIA_ENGINE_S3_ACCESS_KEY_ID: ${MEDIA_ENGINE_S3_ACCESS_KEY_ID:-}
+      MEDIA_ENGINE_S3_SECRET_ACCESS_KEY: ${MEDIA_ENGINE_S3_SECRET_ACCESS_KEY:-}
+      MEDIA_ENGINE_S3_BUCKET: ${MEDIA_ENGINE_S3_BUCKET:?Set the shared S3 bucket}
+      MEDIA_ENGINE_S3_REGION: ${MEDIA_ENGINE_S3_REGION:-us-east-1}
+      MEDIA_ENGINE_S3_FORCE_PATH_STYLE: ${MEDIA_ENGINE_S3_FORCE_PATH_STYLE:-true}
+      MEDIA_ENGINE_SELF_TEST_ON_STARTUP: "true"
+      MEDIA_ENGINE_INPUT_DIR: /worker/input
+      MEDIA_ENGINE_WORK_DIR: /worker/work
+      MEDIA_ENGINE_OUTPUT_DIR: /worker/output
+      MEDIA_ENGINE_TEMP_DIR: /worker/temp
+    volumes:
+      - worker-scratch:/worker
+    command: ["python", "-m", "app.worker"]
+    stop_grace_period: 2m
+
+volumes:
+  worker-scratch:

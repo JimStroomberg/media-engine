@@ -1,0 +1,1 @@
+Database migrations are managed by Alembic. Run `alembic upgrade head` before starting the v2 API or scheduler.

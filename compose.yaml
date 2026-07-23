@@ -1,0 +1,173 @@
+name: media-engine
+
+x-s3-environment: &s3-environment
+  MEDIA_ENGINE_S3_ENDPOINT_URL: http://minio:9000
+  MEDIA_ENGINE_S3_PUBLIC_ENDPOINT_URL: ${MEDIA_ENGINE_S3_PUBLIC_ENDPOINT_URL:-http://localhost:9000}
+  MEDIA_ENGINE_S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-media-engine}
+  MEDIA_ENGINE_S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD}
+  MEDIA_ENGINE_S3_BUCKET: ${MEDIA_ENGINE_S3_BUCKET:-media-engine}
+  MEDIA_ENGINE_S3_REGION: ${MEDIA_ENGINE_S3_REGION:-us-east-1}
+  MEDIA_ENGINE_S3_FORCE_PATH_STYLE: "true"
+
+x-platform-environment: &platform-environment
+  <<: *s3-environment
+  MEDIA_ENGINE_DATABASE_URL: postgresql+asyncpg://media_engine:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/media_engine
+  MEDIA_ENGINE_ASSET_RETENTION_HOURS: ${MEDIA_ENGINE_ASSET_RETENTION_HOURS:-24}
+  MEDIA_ENGINE_PIPELINE_RETENTION_HOURS: ${MEDIA_ENGINE_PIPELINE_RETENTION_HOURS:-24}
+  MEDIA_ENGINE_RETENTION_INTERVAL_SECONDS: ${MEDIA_ENGINE_RETENTION_INTERVAL_SECONDS:-60}
+  MEDIA_ENGINE_WORKER_API_TOKEN: ${MEDIA_ENGINE_WORKER_API_TOKEN:?Set MEDIA_ENGINE_WORKER_API_TOKEN}
+  MEDIA_ENGINE_WORKER_LEASE_SECONDS: ${MEDIA_ENGINE_WORKER_LEASE_SECONDS:-90}
+  # Unset defaults to CPU. An explicitly empty value allows any compatible backend.
+  MEDIA_ENGINE_TRANSCODE_REQUIRED_BACKEND: ${MEDIA_ENGINE_TRANSCODE_REQUIRED_BACKEND-cpu}
+
+x-app-build: &app-build
+  context: .
+  dockerfile: Dockerfile
+  args:
+    BASE_IMAGE: ubuntu:26.04
+    RK_VARIANT: "false"
+
+services:
+  postgres:
+    image: postgres:18.4-alpine
+    restart: unless-stopped
+    shm_size: 128mb
+    environment:
+      POSTGRES_DB: media_engine
+      POSTGRES_USER: media_engine
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U media_engine -d media_engine"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  minio:
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+    command: server /data --console-address ":9001"
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-media-engine}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio-data:/data
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+
+  minio-init:
+    build: *app-build
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_started
+    environment: *s3-environment
+    command: ["python", "-m", "app.s3_init"]
+
+  migrate:
+    build: *app-build
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment: *platform-environment
+    command: ["alembic", "upgrade", "head"]
+
+  api:
+    build: *app-build
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      <<: *platform-environment
+      MEDIA_ENGINE_SELF_TEST_ON_STARTUP: "true"
+      MEDIA_ENGINE_INPUT_DIR: /data/input
+      MEDIA_ENGINE_WORK_DIR: /data/work
+      MEDIA_ENGINE_OUTPUT_DIR: /data/output
+      MEDIA_ENGINE_TEMP_DIR: /tmp/media-engine
+      MEDIA_ENGINE_ADMIN_USERNAME: ${MEDIA_ENGINE_ADMIN_USERNAME:?Set MEDIA_ENGINE_ADMIN_USERNAME}
+      MEDIA_ENGINE_ADMIN_PASSWORD: ${MEDIA_ENGINE_ADMIN_PASSWORD:?Set MEDIA_ENGINE_ADMIN_PASSWORD}
+      MEDIA_ENGINE_ADMIN_SESSION_SECRET: ${MEDIA_ENGINE_ADMIN_SESSION_SECRET:?Set MEDIA_ENGINE_ADMIN_SESSION_SECRET}
+      MEDIA_ENGINE_ADMIN_SESSION_COOKIE_SECURE: ${MEDIA_ENGINE_ADMIN_SESSION_COOKIE_SECURE:-false}
+      MEDIA_ENGINE_CREDENTIAL_ENCRYPTION_KEY: ${MEDIA_ENGINE_CREDENTIAL_ENCRYPTION_KEY:?Set MEDIA_ENGINE_CREDENTIAL_ENCRYPTION_KEY}
+      MEDIA_ENGINE_WEBHOOK_ALLOW_PRIVATE_ADDRESSES: ${MEDIA_ENGINE_WEBHOOK_ALLOW_PRIVATE_ADDRESSES:-false}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      XAI_API_KEY: ${XAI_API_KEY:-}
+    volumes:
+      - media-data:/data
+      - media-scratch:/tmp/media-engine
+    ports:
+      - "${MEDIA_ENGINE_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  scheduler:
+    build: *app-build
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+    environment: *platform-environment
+    command: ["python", "-m", "app.maintenance"]
+
+  webhook-dispatcher:
+    build: *app-build
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      MEDIA_ENGINE_DATABASE_URL: postgresql+asyncpg://media_engine:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/media_engine
+      MEDIA_ENGINE_CREDENTIAL_ENCRYPTION_KEY: ${MEDIA_ENGINE_CREDENTIAL_ENCRYPTION_KEY:?Set MEDIA_ENGINE_CREDENTIAL_ENCRYPTION_KEY}
+      MEDIA_ENGINE_WEBHOOK_DISPATCH_INTERVAL_SECONDS: ${MEDIA_ENGINE_WEBHOOK_DISPATCH_INTERVAL_SECONDS:-1}
+      MEDIA_ENGINE_WEBHOOK_TIMEOUT_SECONDS: ${MEDIA_ENGINE_WEBHOOK_TIMEOUT_SECONDS:-10}
+      MEDIA_ENGINE_WEBHOOK_MAX_ATTEMPTS: ${MEDIA_ENGINE_WEBHOOK_MAX_ATTEMPTS:-8}
+      MEDIA_ENGINE_WEBHOOK_INITIAL_BACKOFF_SECONDS: ${MEDIA_ENGINE_WEBHOOK_INITIAL_BACKOFF_SECONDS:-10}
+      MEDIA_ENGINE_WEBHOOK_MAX_BACKOFF_SECONDS: ${MEDIA_ENGINE_WEBHOOK_MAX_BACKOFF_SECONDS:-3600}
+      MEDIA_ENGINE_WEBHOOK_LEASE_SECONDS: ${MEDIA_ENGINE_WEBHOOK_LEASE_SECONDS:-60}
+      MEDIA_ENGINE_WEBHOOK_ALLOW_PRIVATE_ADDRESSES: ${MEDIA_ENGINE_WEBHOOK_ALLOW_PRIVATE_ADDRESSES:-false}
+    command: ["python", "-m", "app.webhook_dispatcher"]
+
+  worker-cpu:
+    build: *app-build
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      <<: *s3-environment
+      MEDIA_ENGINE_WORKER_API_URL: http://api:8080
+      MEDIA_ENGINE_WORKER_API_TOKEN: ${MEDIA_ENGINE_WORKER_API_TOKEN:?Set MEDIA_ENGINE_WORKER_API_TOKEN}
+      MEDIA_ENGINE_WORKER_KEY: ${MEDIA_ENGINE_CPU_WORKER_KEY:-worker-cpu-1}
+      MEDIA_ENGINE_WORKER_DISPLAY_NAME: ${MEDIA_ENGINE_CPU_WORKER_DISPLAY_NAME:-Compose CPU worker}
+      MEDIA_ENGINE_WORKER_BACKEND: cpu
+      MEDIA_ENGINE_WORKER_HEARTBEAT_SECONDS: ${MEDIA_ENGINE_WORKER_HEARTBEAT_SECONDS:-20}
+      MEDIA_ENGINE_WORKER_POLL_SECONDS: ${MEDIA_ENGINE_WORKER_POLL_SECONDS:-2}
+      MEDIA_ENGINE_SELF_TEST_ON_STARTUP: "true"
+      MEDIA_ENGINE_INPUT_DIR: /worker/input
+      MEDIA_ENGINE_WORK_DIR: /worker/work
+      MEDIA_ENGINE_OUTPUT_DIR: /worker/output
+      MEDIA_ENGINE_TEMP_DIR: /worker/temp
+    volumes:
+      - worker-scratch:/worker
+    command: ["python", "-m", "app.worker"]
+
+volumes:
+  postgres-data:
+  minio-data:
+  media-data:
+  media-scratch:
+  worker-scratch:

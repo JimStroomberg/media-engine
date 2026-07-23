@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
-from typing import List, Optional
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
 
-class JobStatus(str, Enum):
+class JobStatus(StrEnum):
     queued = "queued"
     processing = "processing"
     completed = "completed"
@@ -16,7 +15,7 @@ class JobStatus(str, Enum):
     cancelled = "cancelled"
 
 
-class QualityTarget(str, Enum):
+class QualityTarget(StrEnum):
     auto = "auto"
     uhd_2160p = "uhd_2160p"
     fhd_1080p = "fhd_1080p"
@@ -25,22 +24,25 @@ class QualityTarget(str, Enum):
     audio_only = "audio_only"
 
 
-class CodecPreference(str, Enum):
+class CodecPreference(StrEnum):
     auto = "auto"
     h264 = "h264"
     h265 = "h265"
 
 
 class JobRequest(BaseModel):
-    quality: QualityTarget = Field(QualityTarget.auto, description="Desired output quality preset (use audio_only for AAC extraction)")
+    quality: QualityTarget = Field(
+        QualityTarget.auto,
+        description="Desired output quality preset (use audio_only for AAC extraction)",
+    )
     codec: CodecPreference = Field(CodecPreference.auto, description="Preferred codec for output")
-    callback_url: Optional[HttpUrl] = Field(None, description="Optional webhook to call when the job completes")
+    callback_url: HttpUrl | None = Field(None, description="Optional webhook to call when the job completes")
 
 
 class JobResponse(BaseModel):
     job_id: str
     status: JobStatus
-    message: Optional[str] = None
+    message: str | None = None
 
 
 class JobDetail(BaseModel):
@@ -49,33 +51,29 @@ class JobDetail(BaseModel):
     created_at: datetime
     updated_at: datetime
     source_filename: str
-    output_filename: Optional[str] = None
-    output_path: Optional[Path] = None
+    output_filename: str | None = None
+    output_path: Path | None = None
     quality: QualityTarget
     codec: CodecPreference
-    callback_url: Optional[HttpUrl]
-    error: Optional[str] = None
-    media_duration_seconds: Optional[float] = None
-    download_seconds: Optional[float] = None
-    transcode_seconds: Optional[float] = None
-    transcode_progress: Optional[float] = None
-    transcode_eta_seconds: Optional[float] = None
-    source_width: Optional[int] = None
-    source_height: Optional[int] = None
+    callback_url: HttpUrl | None
+    error: str | None = None
+    media_duration_seconds: float | None = None
+    download_seconds: float | None = None
+    transcode_seconds: float | None = None
+    transcode_progress: float | None = None
+    transcode_eta_seconds: float | None = None
+    source_width: int | None = None
+    source_height: int | None = None
 
-    class Config:
-        json_encoders = {
-            Path: lambda p: str(p),
-            datetime: lambda d: d.isoformat(),
-        }
+    model_config = ConfigDict()
 
 
 class JobListResponse(BaseModel):
-    jobs: List[JobDetail]
+    jobs: list[JobDetail]
 
 
 class CallbackPayload(BaseModel):
     job_id: str
     status: JobStatus
-    output_path: Optional[str] = None
-    message: Optional[str] = None
+    output_path: str | None = None
+    message: str | None = None

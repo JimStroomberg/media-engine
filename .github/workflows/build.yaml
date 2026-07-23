@@ -20,7 +20,55 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Install test dependencies
+        run: python -m pip install --upgrade pip '.[dev]'
+
+      - name: Lint platform foundation
+        run: >-
+          ruff check
+          app/api app/config.py app/domain app/main.py app/maintenance.py app/models.py
+          app/persistence app/processors app/s3_init.py app/services app/storage app/worker.py
+          migrations tests
+
+      - name: Run tests
+        run: pytest -q
+
+      - name: Validate Compose deployments
+        run: |
+          export POSTGRES_PASSWORD=compose-validation-postgres
+          export MINIO_ROOT_PASSWORD=compose-validation-minio
+          export MEDIA_ENGINE_WORKER_API_TOKEN=compose-validation-worker-token
+          export MEDIA_ENGINE_ADMIN_USERNAME=admin
+          export MEDIA_ENGINE_ADMIN_PASSWORD=compose-validation-admin
+          export MEDIA_ENGINE_ADMIN_SESSION_SECRET=compose-validation-session-secret-at-least-32-characters
+          export MEDIA_ENGINE_CREDENTIAL_ENCRYPTION_KEY=Y29tcG9zZS12YWxpZGF0aW9uLWZlcm5ldC1rZXkhISE=
+          docker compose config --quiet
+          docker compose -f compose.yaml -f compose.local-rk1.yaml config --quiet
+          docker compose -f compose.yaml -f compose.control-plane.yaml config --quiet
+
+          export MEDIA_ENGINE_WORKER_API_URL=https://media-engine.example.test
+          export MEDIA_ENGINE_WORKER_KEY=compose-validation-worker
+          export MEDIA_ENGINE_WORKER_DISPLAY_NAME="Compose validation worker"
+          export MEDIA_ENGINE_S3_BUCKET=media-engine
+          docker compose -f compose.worker.yaml config --quiet
+          docker compose -f compose.worker-rk1.yaml config --quiet
+
   build:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -142,6 +190,7 @@ jobs:
           sbom: true
           provenance: true
           build-args: |
+            BASE_IMAGE=ubuntu:26.04
             RK_VARIANT=false
           cache-from: |
             type=registry,ref=${{ env.CACHE_REF_BASE }}
@@ -162,6 +211,7 @@ jobs:
           sbom: false
           provenance: false
           build-args: |
+            BASE_IMAGE=ubuntu:26.04
             RK_VARIANT=false
           outputs: type=cacheonly
           tags: ${{ steps.tags_base.outputs.tags }}
@@ -178,6 +228,7 @@ jobs:
           sbom: true
           provenance: true
           build-args: |
+            BASE_IMAGE=ubuntu:24.04
             RK_VARIANT=true
           cache-from: |
             type=registry,ref=${{ env.CACHE_REF_RK }}
@@ -197,6 +248,7 @@ jobs:
           sbom: false
           provenance: false
           build-args: |
+            BASE_IMAGE=ubuntu:24.04
             RK_VARIANT=true
           outputs: type=cacheonly
           tags: ${{ steps.tags_rk.outputs.tags }}

@@ -9,6 +9,8 @@ build/
 .env
 *.env
 .env.*
+!.env.local.example
+!.env.worker.example
 .venv/
 venv/
 .DS_Store
