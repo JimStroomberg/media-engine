@@ -25,6 +25,24 @@ worker API and the worker discards it after the attempt.
 | Standalone CPU worker | `docker compose --env-file .env.worker -f compose.worker.yaml up -d` | Generic AMD64 or ARM64 worker |
 | Standalone RK1 worker | `docker compose --env-file .env.worker -f compose.worker-rk1.yaml up -d` | RK3588 worker with RKMPP devices |
 | All-in-one RK1 | `docker compose --env-file .env.local -f compose.yaml -f compose.local-rk1.yaml up -d --build` | Control plane and RK1 worker share one host |
+| Portainer all-in-one RK1 | Deploy `compose.portainer-rk1.yaml` as a Docker Standalone stack | Portainer must pull release images without a repository build context |
+
+## Portainer all-in-one RK1
+
+`compose.portainer-rk1.yaml` is a self-contained stack for Portainer's web editor or stack API. It uses prebuilt images
+from `jimstro/media-engine`, preserves stack-local `./data` for the temporary legacy endpoints, and stores all v2 durable
+state in named PostgreSQL and MinIO volumes.
+
+Set the platform secrets from `.env.local` as Portainer stack environment variables. Also set:
+
+- `MEDIA_ENGINE_S3_PUBLIC_ENDPOINT_URL` to the browser- and client-reachable MinIO API URL;
+- `MEDIA_ENGINE_IMAGE` to an immutable generic tag such as `jimstro/media-engine:main-589fd0e`;
+- `MEDIA_ENGINE_RK1_IMAGE` to the matching immutable RK1 tag such as `jimstro/media-engine:rk1-main-589fd0e`;
+- `MEDIA_ENGINE_PORT`, `MINIO_API_PORT`, and `MINIO_CONSOLE_PORT` to unused host ports.
+
+The generic and RK1 image tags must come from the same commit. Portainer pulls both images on every stack update, while
+the immutable tags ensure that a deployment can be reproduced or rolled back exactly. Keep `pull_policy: always` so a
+new node does not silently reuse an incomplete local image.
 
 ## Prepare the control plane
 

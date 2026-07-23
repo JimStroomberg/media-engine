@@ -59,6 +59,8 @@ jobs:
           docker compose config --quiet
           docker compose -f compose.yaml -f compose.local-rk1.yaml config --quiet
           docker compose -f compose.yaml -f compose.control-plane.yaml config --quiet
+          export MEDIA_ENGINE_S3_PUBLIC_ENDPOINT_URL=https://s3.example.test
+          docker compose -f compose.portainer-rk1.yaml config --quiet
 
           export MEDIA_ENGINE_WORKER_API_URL=https://media-engine.example.test
           export MEDIA_ENGINE_WORKER_KEY=compose-validation-worker
