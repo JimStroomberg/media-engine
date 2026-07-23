@@ -180,7 +180,7 @@ jobs:
       # --- BASE build (RK_VARIANT=false) ---
       - name: Build BASE (${{ env.BASE_PLATFORMS }})
         if: ${{ steps.ctx.outputs.is_fork_pr != 'true' }}
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
@@ -202,7 +202,7 @@ jobs:
 
       - name: Build BASE (forked PR, cache-only)
         if: ${{ steps.ctx.outputs.is_fork_pr == 'true' }}
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
@@ -219,7 +219,7 @@ jobs:
       # --- RK1 build (RK_VARIANT=true) ---
       - name: Build RK1 (${{ env.RK_PLATFORMS }})
         if: ${{ steps.ctx.outputs.is_fork_pr != 'true' }}
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
@@ -239,7 +239,7 @@ jobs:
 
       - name: Build RK1 (forked PR, cache-only)
         if: ${{ steps.ctx.outputs.is_fork_pr == 'true' }}
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
