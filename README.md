@@ -336,7 +336,7 @@ docker compose -f docker-compose.cpu.yml up -d
 ## Building + pushing images
 Use the helper in `scripts/dockerbuild.sh` to publish both the generic and RK1 variants.
 ```bash
-./scripts/dockerbuild.sh v0.2.1
+./scripts/dockerbuild.sh v0.2.2
 ```
 Environment knobs:
 - `IMAGE_REPO` – Docker repository name.

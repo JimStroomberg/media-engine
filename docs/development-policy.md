@@ -16,7 +16,9 @@ New work targets current stable language runtimes, databases, libraries, contain
 
 An older dependency is acceptable only for a concrete compatibility constraint. Record the exception next to the deployment or package that needs it, keep its scope narrow, and retain a test for that variant. The RK1 worker's Ubuntu 24.04 base is one such exception because its Rockchip multimedia packages are not published for Ubuntu 26.04.
 
-Dependency updates should be automated before the first stable v2 release, with tests and image builds required before merging an update.
+Dependency updates are automated weekly. GitHub Actions are pinned to immutable commit SHAs with readable release
+comments, while Dependabot keeps both application dependencies and action pins current. Pull requests must pass tests,
+Compose validation, and secret-free multi-platform image builds before merging.
 
 ## Stable v2 threshold
 

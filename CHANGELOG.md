@@ -2,6 +2,20 @@
 
 All notable Media Engine changes are documented here.
 
+## 0.2.2 - 2026-07-25
+
+### Changed
+
+- Refreshed all Python packages with newer stable releases available at publication time, including FastAPI 0.140,
+  OpenAI 2.48, Ruff 0.16, aiofiles 25.1, boto3 1.43.56, httpx2 2.9.1, and setuptools 83.
+- Upgraded every GitHub and Docker build action to its current stable major/minor release and pinned each action to its
+  immutable commit SHA.
+
+### Fixed
+
+- Pull-request and Dependabot image checks now use a secret-free local multi-platform build path instead of attempting
+  Docker Hub authentication with credentials that GitHub intentionally withholds.
+
 ## 0.2.1 - 2026-07-25
 
 ### Added

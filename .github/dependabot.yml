@@ -13,8 +13,16 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    groups:
+      container-runtime:
+        patterns:
+          - "*"
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    groups:
+      ci-actions:
+        patterns:
+          - "*"

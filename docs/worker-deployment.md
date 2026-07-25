@@ -87,7 +87,7 @@ docker compose --env-file .env.worker -f compose.worker.yaml logs -f worker
 ```
 
 For a release deployment, pin `MEDIA_ENGINE_WORKER_IMAGE` to an immutable version such as
-`jimstro/media-engine:0.2.1`. Leaving it empty uses `jimstro/media-engine:latest`.
+`jimstro/media-engine:0.2.2`. Leaving it empty uses `jimstro/media-engine:latest`.
 
 ## Deploy an RK1 worker
 
@@ -100,7 +100,7 @@ docker compose --env-file .env.worker -f compose.worker-rk1.yaml logs -f worker
 ```
 
 The RK1 file defaults to `jimstro/media-engine:rk1-latest`; pin releases as
-`jimstro/media-engine:rk1-0.2.1`. It exposes the RK3588 DRM, MPP, RGA, and DMA-heap devices and deliberately fails its
+`jimstro/media-engine:rk1-0.2.2`. It exposes the RK3588 DRM, MPP, RGA, and DMA-heap devices and deliberately fails its
 startup self-test when RKMPP is unavailable. The image uses Ubuntu 24.04 because the Rockchip multimedia packages are not
 published for Ubuntu 26.04.
 
