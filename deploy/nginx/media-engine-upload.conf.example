@@ -1,0 +1,77 @@
+# Optional DNS-only hostname for large Media Engine uploads.
+#
+# This is useful when the main API remains behind a CDN with a request-body
+# limit. Point upload.media.example.com directly at the reverse proxy and use a
+# publicly trusted certificate; a Cloudflare Origin CA certificate is not
+# trusted by clients connecting directly.
+#
+# The hostname exposes only POST /v2/assets. Products may upload through this
+# hostname and use the normal public API hostname for every subsequent request.
+#
+# This example assumes the QUIC defaults and persistent host key from
+# media-engine.conf.example are loaded. If this is the only QUIC virtual host
+# on the server, add `reuseport rcvbuf=4m sndbuf=4m` to both
+# `listen ... quic` directives below and install 99-nginx-quic.conf.example.
+
+upstream media_engine_upload_api {
+    server 127.0.0.1:8080;
+    keepalive 16;
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name upload.media.example.com;
+
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    listen 443 quic;
+    listen [::]:443 quic;
+    http2 on;
+    server_name upload.media.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/upload.media.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/upload.media.example.com/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+
+    server_tokens off;
+    client_max_body_size 10g;
+    client_body_timeout  3600s;
+    send_timeout         3600s;
+
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Alt-Svc 'h3=":443"; ma=86400' always;
+
+    access_log /var/log/nginx/media-engine-upload.access.log;
+    error_log  /var/log/nginx/media-engine-upload.error.log;
+
+    location = /v2/assets {
+        proxy_pass http://media_engine_upload_api;
+
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host  $host;
+
+        proxy_connect_timeout 30s;
+        proxy_send_timeout    3600s;
+        proxy_read_timeout    3600s;
+
+        proxy_request_buffering off;
+        proxy_buffering off;
+    }
+
+    # Keep the dashboard, management API, worker protocol, documentation, job
+    # endpoints, and MinIO unavailable through the direct-upload hostname.
+    location / {
+        return 404;
+    }
+}

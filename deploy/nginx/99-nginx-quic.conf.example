@@ -1,0 +1,5 @@
+# Install as /etc/sysctl.d/99-nginx-quic.conf when the QUIC listener uses
+# rcvbuf=4m and sndbuf=4m. The larger maxima leave room for Linux's socket
+# buffer accounting while keeping memory use bounded.
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216

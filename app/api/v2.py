@@ -10,7 +10,13 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import Settings, get_settings
-from ..domain.pipelines import PipelineDefinition, UnsupportedPipeline, get_pipeline, list_pipelines
+from ..domain.pipelines import (
+    PipelineDefinition,
+    UnsupportedPipeline,
+    get_pipeline,
+    list_pipelines,
+    required_capabilities_for_stage,
+)
 from ..persistence.database import get_session_factory
 from ..persistence.models import Artifact, Asset, JobRequest
 from ..security import CredentialCipher
@@ -108,6 +114,22 @@ class PipelineArtifactContractResponse(BaseModel):
     schema_version: str
 
 
+class PipelineProviderEffectiveDefaultsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str
+    model: str
+
+
+class PipelineProviderSelectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider_option: str
+    model_option: str
+    supported_providers: list[str]
+    effective_defaults: PipelineProviderEffectiveDefaultsResponse
+
+
 class PipelineStageContractResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -115,6 +137,8 @@ class PipelineStageContractResponse(BaseModel):
     processor: str
     depends_on: list[str]
     required_capabilities: dict[str, list[str]]
+    effective_required_capabilities: dict[str, list[str]]
+    provider_selection: PipelineProviderSelectionResponse | None
     outputs: list[PipelineArtifactContractResponse]
 
 
@@ -126,6 +150,8 @@ class PipelineResponse(BaseModel):
     schema_version: str
     processor_versions: dict[str, str]
     options_schema: dict[str, Any]
+    effective_options: dict[str, Any]
+    available_providers: list[str]
     required_artifacts: list[str]
     stages: list[PipelineStageContractResponse]
 
@@ -247,13 +273,21 @@ def response_from_job(job: JobRequest, *, idempotent_replay: bool = False) -> Jo
     )
 
 
-def response_from_pipeline(pipeline: PipelineDefinition) -> PipelineResponse:
+def response_from_pipeline(
+    pipeline: PipelineDefinition,
+    *,
+    effective_options: dict[str, Any] | None = None,
+    available_providers: set[str] | frozenset[str] = frozenset(),
+) -> PipelineResponse:
+    resolved_options = pipeline.normalize_options({}) if effective_options is None else dict(effective_options)
     return PipelineResponse(
         name=pipeline.name,
         version=pipeline.version,
         schema_version=pipeline.schema_version,
         processor_versions=dict(pipeline.processor_versions),
         options_schema=pipeline.options_model.model_json_schema(),
+        effective_options=resolved_options,
+        available_providers=sorted(set(pipeline.supported_providers).intersection(available_providers)),
         required_artifacts=list(pipeline.required_artifacts),
         stages=[
             PipelineStageContractResponse(
@@ -261,6 +295,20 @@ def response_from_pipeline(pipeline: PipelineDefinition) -> PipelineResponse:
                 processor=stage.processor,
                 depends_on=list(stage.depends_on),
                 required_capabilities={key: list(values) for key, values in stage.required_capabilities.items()},
+                effective_required_capabilities=required_capabilities_for_stage(stage, resolved_options),
+                provider_selection=(
+                    PipelineProviderSelectionResponse(
+                        provider_option=stage.provider_selection.provider_option,
+                        model_option=stage.provider_selection.model_option,
+                        supported_providers=list(stage.provider_selection.supported_providers),
+                        effective_defaults=PipelineProviderEffectiveDefaultsResponse(
+                            provider=str(resolved_options[stage.provider_selection.provider_option]),
+                            model=str(resolved_options[stage.provider_selection.model_option]),
+                        ),
+                    )
+                    if stage.provider_selection is not None
+                    else None
+                ),
                 outputs=[
                     PipelineArtifactContractResponse(
                         artifact_type=output.artifact_type,
@@ -275,30 +323,84 @@ def response_from_pipeline(pipeline: PipelineDefinition) -> PipelineResponse:
     )
 
 
+async def runtime_pipeline_response(
+    pipeline: PipelineDefinition,
+    *,
+    session: AsyncSession,
+    provider_service: ProviderConfigurationService,
+    available_providers: set[str] | None = None,
+) -> PipelineResponse:
+    raw_options: dict[str, Any] = {}
+    if pipeline.name == "understand" and pipeline.version == "2":
+        raw_options, available_providers = await provider_service.understand_discovery_defaults(session)
+    elif available_providers is None:
+        available_providers = await provider_service.enabled_provider_names(session)
+    return response_from_pipeline(
+        pipeline,
+        effective_options=pipeline.normalize_options(raw_options),
+        available_providers=available_providers,
+    )
+
+
 @router.get(
     "/pipelines",
     response_model=list[PipelineResponse],
     summary="List pipeline contracts",
+    responses={503: {"model": ErrorResponse, "description": "AI provider configuration is unavailable"}},
 )
-async def get_pipelines() -> list[PipelineResponse]:
+async def get_pipelines(
+    settings: Settings = Depends(get_settings),
+    cipher: CredentialCipher = Depends(get_credential_cipher),
+    session: AsyncSession = Depends(database_session),
+) -> list[PipelineResponse]:
     """List server-owned, versioned processing contracts."""
 
-    return [response_from_pipeline(pipeline) for pipeline in list_pipelines()]
+    provider_service = ProviderConfigurationService(settings, cipher)
+    available_providers = await provider_service.enabled_provider_names(session)
+    try:
+        return [
+            await runtime_pipeline_response(
+                pipeline,
+                session=session,
+                provider_service=provider_service,
+                available_providers=available_providers,
+            )
+            for pipeline in list_pipelines()
+        ]
+    except ProviderUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.get(
     "/pipelines/{pipeline_name}",
     response_model=PipelineResponse,
     summary="Get a pipeline contract",
-    responses={404: {"model": ErrorResponse, "description": "Pipeline not found"}},
+    responses={
+        404: {"model": ErrorResponse, "description": "Pipeline not found"},
+        503: {"model": ErrorResponse, "description": "AI provider configuration is unavailable"},
+    },
 )
-async def get_pipeline_contract(pipeline_name: str, version: str | None = None) -> PipelineResponse:
+async def get_pipeline_contract(
+    pipeline_name: str,
+    version: str | None = None,
+    settings: Settings = Depends(get_settings),
+    cipher: CredentialCipher = Depends(get_credential_cipher),
+    session: AsyncSession = Depends(database_session),
+) -> PipelineResponse:
     """Describe the requested version, or the latest version, of one processing contract."""
 
     try:
-        return response_from_pipeline(get_pipeline(pipeline_name, version))
+        pipeline = get_pipeline(pipeline_name, version)
+        provider_service = ProviderConfigurationService(settings, cipher)
+        return await runtime_pipeline_response(
+            pipeline,
+            session=session,
+            provider_service=provider_service,
+        )
     except UnsupportedPipeline as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ProviderUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.post(

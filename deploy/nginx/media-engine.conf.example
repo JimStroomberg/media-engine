@@ -1,0 +1,212 @@
+# Recommended public reverse proxy for Media Engine.
+#
+# Replace:
+#   media.example.com     with the public API/dashboard hostname
+#   s3.media.example.com  with the public S3 download hostname
+#   certificate paths     with the certificate and private-key paths
+#   upstream ports        when Docker publishes different host ports
+#
+# The example expects one SAN certificate covering both public hostnames.
+# See docs/reverse-proxy.md for the matching Certbot command.
+#
+# This example requires NGINX 1.25.0+ built with ngx_http_v3_module. Official
+# NGINX Linux packages include the module. Keep TCP 443 open for HTTP/2 and
+# also allow/forward UDP 443 for HTTP/3.
+#
+# Merge deploy/nginx/nginx-quic-main.conf.example into the matching main and
+# events contexts of /etc/nginx/nginx.conf before loading this HTTP snippet.
+# Install deploy/nginx/99-nginx-quic.conf.example under /etc/sysctl.d when
+# using the explicit QUIC socket buffers below.
+#
+# Generate the persistent QUIC token key before loading this file:
+#   openssl rand -out /etc/nginx/quic_host.key 32
+#   chown root:root /etc/nginx/quic_host.key
+#   chmod 0600 /etc/nginx/quic_host.key
+
+log_format media_engine_edge '$remote_addr - $remote_user [$time_local] '
+                             '"$request" $status $body_bytes_sent '
+                             '"$http_referer" "$http_user_agent" '
+                             'protocol=$server_protocol http3="$http3" '
+                             'request_time=$request_time';
+
+# Validate client addresses before NGINX sends a larger QUIC response. Keep
+# early data disabled because uploads and API mutations must not be replayed.
+quic_retry on;
+quic_host_key /etc/nginx/quic_host.key;
+ssl_early_data off;
+
+# Enable only after the host's UDP segmentation offload is verified. See
+# docs/reverse-proxy.md and nginx-quic-gso.service.example.
+# quic_gso on;
+
+upstream media_engine_api {
+    server 127.0.0.1:8080;
+    keepalive 16;
+}
+
+upstream media_engine_s3 {
+    server 127.0.0.1:9000;
+    keepalive 16;
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name media.example.com;
+
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    # Specify reuseport on exactly one QUIC virtual host per address and port.
+    listen 443 quic reuseport rcvbuf=4m sndbuf=4m;
+    listen [::]:443 quic reuseport rcvbuf=4m sndbuf=4m;
+    http2 on;
+    server_name media.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/media.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/media.example.com/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+
+    server_tokens off;
+
+    # Match this with MEDIA_ENGINE_MAX_UPLOAD_BYTES when the application limit
+    # is enabled. NGINX otherwise defaults to only 1 MB.
+    client_max_body_size 10g;
+    client_body_timeout  3600s;
+    send_timeout         3600s;
+
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
+    add_header Alt-Svc 'h3=":443"; ma=86400' always;
+
+    gzip on;
+    gzip_vary on;
+    gzip_types text/plain text/css application/json application/javascript application/xml image/svg+xml;
+
+    access_log /var/log/nginx/media-engine.access.log media_engine_edge;
+    error_log  /var/log/nginx/media-engine.error.log;
+
+    # Serve a tiny static project page without starting an application request.
+    # Install deploy/nginx/media-engine-landing.html as:
+    # /var/www/media-engine/index.html
+    location = / {
+        root /var/www/media-engine;
+        try_files /index.html =404;
+
+        access_log off;
+        log_not_found off;
+
+        add_header Cache-Control "public, max-age=3600" always;
+        # This location defines its own headers, so repeat the HTTP/3
+        # advertisement instead of relying on server-level inheritance.
+        add_header Alt-Svc 'h3=":443"; ma=86400' always;
+        add_header Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" always;
+        add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
+        add_header Referrer-Policy "no-referrer" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-Frame-Options "DENY" always;
+    }
+
+    # The public hostname must never expose the worker control protocol.
+    # Local all-in-one workers use Docker networking. Remote workers should use
+    # a VPN/private route or the restricted example in media-engine-worker.conf.example.
+    location = /v2/internal {
+        return 404;
+    }
+
+    location ^~ /v2/internal/ {
+        return 404;
+    }
+
+    location / {
+        proxy_pass http://media_engine_api;
+
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host  $host;
+
+        proxy_connect_timeout 30s;
+        proxy_send_timeout    3600s;
+        proxy_read_timeout    3600s;
+
+        # Stream large uploads to Media Engine instead of buffering them to the
+        # reverse proxy's local disk.
+        proxy_request_buffering off;
+        proxy_buffering off;
+    }
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name s3.media.example.com;
+
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    listen 443 quic;
+    listen [::]:443 quic;
+    http2 on;
+    server_name s3.media.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/media.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/media.example.com/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+
+    server_tokens off;
+    client_max_body_size 10g;
+    client_body_timeout  3600s;
+    send_timeout         3600s;
+
+    add_header Alt-Svc 'h3=":443"; ma=86400' always;
+
+    access_log /var/log/nginx/media-engine-s3.access.log media_engine_edge;
+    error_log  /var/log/nginx/media-engine-s3.error.log;
+
+    # The MinIO console is a separate service/port and should remain private.
+    # This additionally hides MinIO's administrative API on the public S3 host.
+    location ^~ /minio/admin/ {
+        return 404;
+    }
+
+    location / {
+        # Do not append a URI or trailing slash to proxy_pass. S3 signatures
+        # cover the original host, path, and query string.
+        proxy_pass http://media_engine_s3;
+
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host  $host;
+
+        proxy_connect_timeout 30s;
+        proxy_send_timeout    3600s;
+        proxy_read_timeout    3600s;
+
+        proxy_request_buffering off;
+        proxy_buffering off;
+        proxy_cache off;
+
+        # Signed artifacts must not remain accessible from a proxy cache after
+        # their URL expires.
+        proxy_hide_header Cache-Control;
+        add_header Cache-Control "private, no-store" always;
+        add_header Alt-Svc 'h3=":443"; ma=86400' always;
+        add_header X-Content-Type-Options "nosniff" always;
+    }
+}

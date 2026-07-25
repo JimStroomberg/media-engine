@@ -3,9 +3,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, GetJsonSchemaHandler, model_validator
+from pydantic.json_schema import JsonSchemaValue
+from pydantic_core import CoreSchema
 
 from ..models import CodecPreference, QualityTarget
 
@@ -22,10 +24,18 @@ class PipelineArtifactDefinition:
 
 
 @dataclass(frozen=True)
+class PipelineProviderSelectionDefinition:
+    provider_option: str
+    model_option: str
+    supported_providers: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class PipelineStageDefinition:
     name: str
     processor: str
     required_capabilities: Mapping[str, tuple[str, ...]]
+    provider_selection: PipelineProviderSelectionDefinition | None = None
     depends_on: tuple[str, ...] = ()
     outputs: tuple[PipelineArtifactDefinition, ...] = ()
 
@@ -62,6 +72,18 @@ class PipelineDefinition:
     def required_artifacts(self) -> tuple[str, ...]:
         return tuple(output.artifact_type for stage in self.stages for output in stage.outputs if output.required)
 
+    @property
+    def supported_providers(self) -> tuple[str, ...]:
+        providers = {
+            provider
+            for stage in self.stages
+            for provider in stage.required_capabilities.get("providers", ())
+        }
+        for stage in self.stages:
+            if stage.provider_selection is not None:
+                providers.update(stage.provider_selection.supported_providers)
+        return tuple(sorted(providers))
+
 
 class TranscodeOptions(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -92,7 +114,42 @@ class UnderstandOptions(MediaPreparationOptions):
     summary_model: str = Field("gpt-5.6-terra", min_length=1, max_length=128)
 
 
+UNDERSTAND_PROVIDER_MODELS: Mapping[str, Mapping[str, str]] = MappingProxyType(
+    {
+        "openai": MappingProxyType(
+            {
+                "transcription": "gpt-4o-transcribe-diarize",
+                "planning": "gpt-5.6-terra",
+                "vision": "gpt-5.6-sol",
+                "summary": "gpt-5.6-terra",
+            }
+        ),
+        "xai": MappingProxyType(
+            {
+                "transcription": "grok-transcribe",
+                "planning": "grok-4.5",
+                "vision": "grok-4.5",
+                "summary": "grok-4.5",
+            }
+        ),
+    }
+)
+
+
 class UnderstandV2Options(UnderstandOptions):
+    _DYNAMIC_DEFAULT_FIELDS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "transcription_provider",
+            "transcription_model",
+            "planning_provider",
+            "planning_model",
+            "vision_provider",
+            "vision_model",
+            "summary_provider",
+            "summary_model",
+        }
+    )
+
     transcription_provider: Literal["openai", "xai"] = "xai"
     vision_provider: Literal["openai", "xai"] = "xai"
     summary_provider: Literal["openai", "xai"] = "xai"
@@ -109,29 +166,41 @@ class UnderstandV2Options(UnderstandOptions):
         if not isinstance(value, Mapping):
             return value
         options = dict(value)
-        provider_defaults = {
-            "transcription": {"openai": "gpt-4o-transcribe-diarize", "xai": "grok-transcribe"},
-            "vision": {"openai": "gpt-5.6-sol", "xai": "grok-4.5"},
-            "summary": {"openai": "gpt-5.6-terra", "xai": "grok-4.5"},
-            "planning": {"openai": "gpt-5.6-terra", "xai": "grok-4.5"},
-        }
-        for stage, defaults in provider_defaults.items():
+        for stage in ("transcription", "planning", "vision", "summary"):
             provider = str(options.get(f"{stage}_provider", "xai"))
-            options.setdefault(f"{stage}_model", defaults.get(provider, defaults["openai"]))
+            defaults = UNDERSTAND_PROVIDER_MODELS.get(provider)
+            if defaults is not None:
+                options.setdefault(f"{stage}_model", defaults[stage])
         return options
+
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls,
+        core_schema: CoreSchema,
+        handler: GetJsonSchemaHandler,
+    ) -> JsonSchemaValue:
+        schema = super().__get_pydantic_json_schema__(core_schema, handler)
+        schema = handler.resolve_ref_schema(schema)
+        properties = schema.get("properties", {})
+        for field_name in cls._DYNAMIC_DEFAULT_FIELDS:
+            field_schema = properties.get(field_name)
+            if isinstance(field_schema, dict):
+                field_schema.pop("default", None)
+        return schema
 
 
 _LOCAL_CAPABILITIES = MappingProxyType({"processors": ("ffmpeg", "tesseract")})
 _OPENAI_CAPABILITIES = MappingProxyType({"providers": ("openai",)})
+_NO_CAPABILITIES: Mapping[str, tuple[str, ...]] = MappingProxyType({})
+_UNDERSTAND_PROVIDERS = tuple(UNDERSTAND_PROVIDER_MODELS)
 
-_PROVIDER_OPTION_BY_PROCESSOR = MappingProxyType(
-    {
-        "ai_transcribe": "transcription_provider",
-        "ai_visual_describe": "vision_provider",
-        "ai_content_plan": "planning_provider",
-        "ai_summarize_v2": "summary_provider",
-    }
-)
+
+def _provider_selection(stage: str) -> PipelineProviderSelectionDefinition:
+    return PipelineProviderSelectionDefinition(
+        provider_option=f"{stage}_provider",
+        model_option=f"{stage}_model",
+        supported_providers=_UNDERSTAND_PROVIDERS,
+    )
 
 
 def required_capabilities_for_stage(
@@ -141,9 +210,8 @@ def required_capabilities_for_stage(
     """Resolve option-driven provider requirements for a concrete stage run."""
 
     capabilities = {key: list(values) for key, values in stage.required_capabilities.items()}
-    provider_option = _PROVIDER_OPTION_BY_PROCESSOR.get(stage.processor)
-    if provider_option is not None:
-        capabilities["providers"] = [str(options[provider_option])]
+    if stage.provider_selection is not None:
+        capabilities["providers"] = [str(options[stage.provider_selection.provider_option])]
     return capabilities
 
 
@@ -251,14 +319,16 @@ _UNDERSTAND_V2_STAGES = _media_foundation_stages() + (
     PipelineStageDefinition(
         name="transcribe",
         processor="ai_transcribe",
-        required_capabilities=_OPENAI_CAPABILITIES,
+        required_capabilities=_NO_CAPABILITIES,
+        provider_selection=_provider_selection("transcription"),
         depends_on=("audio_extract",),
         outputs=(PipelineArtifactDefinition("transcript"),),
     ),
     PipelineStageDefinition(
         name="content_plan",
         processor="ai_content_plan",
-        required_capabilities=_OPENAI_CAPABILITIES,
+        required_capabilities=_NO_CAPABILITIES,
+        provider_selection=_provider_selection("planning"),
         depends_on=("probe", "subtitle_extract", "scene_detect", "coarse_ocr", "transcribe"),
         outputs=(PipelineArtifactDefinition("content_plan"),),
     ),
@@ -282,14 +352,16 @@ _UNDERSTAND_V2_STAGES = _media_foundation_stages() + (
     PipelineStageDefinition(
         name="visual_describe",
         processor="ai_visual_describe",
-        required_capabilities=_OPENAI_CAPABILITIES,
+        required_capabilities=_NO_CAPABILITIES,
+        provider_selection=_provider_selection("vision"),
         depends_on=("keyframe_extract",),
         outputs=(PipelineArtifactDefinition("visual_descriptions"),),
     ),
     PipelineStageDefinition(
         name="summarize",
         processor="ai_summarize_v2",
-        required_capabilities=_OPENAI_CAPABILITIES,
+        required_capabilities=_NO_CAPABILITIES,
+        provider_selection=_provider_selection("summary"),
         depends_on=(
             "probe",
             "subtitle_extract",

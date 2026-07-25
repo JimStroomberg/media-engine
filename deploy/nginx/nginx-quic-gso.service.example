@@ -1,0 +1,15 @@
+[Unit]
+Description=Enable UDP segmentation offload for Nginx QUIC
+Documentation=https://nginx.org/en/docs/quic.html
+# Replace ens18 in this file when the public interface uses another name.
+Wants=sys-subsystem-net-devices-ens18.device
+After=sys-subsystem-net-devices-ens18.device
+Before=nginx.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/ethtool -K ens18 tx-udp-segmentation on
+RemainAfterExit=yes
+
+[Install]
+WantedBy=nginx.service

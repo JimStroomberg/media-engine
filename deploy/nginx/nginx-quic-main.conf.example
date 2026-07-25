@@ -1,0 +1,17 @@
+# Merge these settings into /etc/nginx/nginx.conf. This is an example of the
+# required contexts, not a drop-in file for /etc/nginx/conf.d.
+
+# Main context: Linux 5.7+ only. Routes migrated QUIC connections to the
+# worker that owns their connection ID when reuseport is active.
+quic_bpf on;
+
+events {
+    # Each proxied request can consume both a client and an upstream
+    # connection. Raise the common distribution default for long media jobs.
+    worker_connections 4096;
+}
+
+http {
+    # Keep the rest of the existing HTTP configuration here. The Media Engine
+    # server blocks and HTTP-context QUIC defaults belong in conf.d.
+}

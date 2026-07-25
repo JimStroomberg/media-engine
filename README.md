@@ -10,6 +10,9 @@ The repository currently exposes two surfaces:
 The locked design and delivery sequence live in [docs/architecture-v2.md](docs/architecture-v2.md) and [ROADMAP.md](ROADMAP.md).
 Release notes are in [CHANGELOG.md](CHANGELOG.md), and the pre-stable compatibility and current-version rules are defined
 in [docs/development-policy.md](docs/development-policy.md).
+Production HTTPS, HTTP/3/QUIC, and large-upload considerations are documented in
+[docs/reverse-proxy.md](docs/reverse-proxy.md), with reusable NGINX examples under
+[`deploy/nginx`](deploy/nginx).
 
 ## Build status
 [![Build & Push via Docker Build Cloud](https://github.com/JimStroomberg/media-engine/actions/workflows/build.yaml/badge.svg?branch=main)](https://github.com/JimStroomberg/media-engine/actions/workflows/build.yaml)
@@ -226,6 +229,10 @@ Understand v2 also supports xAI independently for transcription, planning, visio
 Responses stages. Providers may be mixed within one run. Provider and model choices are included in the deterministic
 run key, so paired OpenAI/xAI evaluations never collide in the cache.
 
+Pipeline discovery separates supported provider alternatives from the instance's current effective defaults. Dynamic
+provider/model defaults appear in `effective_options`, while each selectable stage reports `provider_selection` and
+`effective_required_capabilities`; the completed manifest remains authoritative for the accepted run.
+
 The platform contract is documented in [docs/api-v2.md](docs/api-v2.md), and storage/cache semantics in [docs/artifact-and-cache.md](docs/artifact-and-cache.md).
 
 ## Run the temporary legacy transcoder
@@ -329,7 +336,7 @@ docker compose -f docker-compose.cpu.yml up -d
 ## Building + pushing images
 Use the helper in `scripts/dockerbuild.sh` to publish both the generic and RK1 variants.
 ```bash
-./scripts/dockerbuild.sh v0.1.0
+./scripts/dockerbuild.sh v0.2.1
 ```
 Environment knobs:
 - `IMAGE_REPO` – Docker repository name.

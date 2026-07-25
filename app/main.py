@@ -8,6 +8,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from . import __version__
 from .api.admin import router as admin_router
 from .api.dashboard import router as dashboard_router
 from .api.internal import router as internal_worker_router
@@ -81,7 +82,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Media Engine",
-    version="0.2.0",
+    version=__version__,
     description=(
         "Product-neutral, S3-backed media processing with durable pipeline graphs. "
         "The `/v2` surface is the pre-stable public platform contract; `/jobs` is temporary legacy migration support."

@@ -39,7 +39,39 @@ Return asset metadata, exact content identity, storage state, and expiry without
 Pipeline contracts are discoverable through:
 
 - `GET /v2/pipelines`: list current server-owned pipeline versions;
-- `GET /v2/pipelines/{name}`: return options JSON Schema, dependency graph, capability requirements, and output contract.
+- `GET /v2/pipelines/{name}`: return options JSON Schema, effective instance defaults, dependency graph, capability
+  requirements, provider alternatives, and output contract.
+
+`options_schema` describes accepted input but deliberately omits defaults for provider and model fields whose values are
+resolved from management configuration. `effective_options` contains the fully normalized values that an empty options
+object would use on this instance at discovery time. `available_providers` lists enabled provider connections without
+exposing credentials.
+
+For every stage, `required_capabilities` contains only unconditional requirements. Provider-selectable stages add a
+`provider_selection` object with the option names, all supported provider adapters, and the effective provider/model
+defaults. `effective_required_capabilities` is the concrete worker requirement produced by `effective_options`. For
+example:
+
+```json
+{
+  "required_capabilities": {},
+  "effective_required_capabilities": {
+    "providers": ["xai"]
+  },
+  "provider_selection": {
+    "provider_option": "vision_provider",
+    "model_option": "vision_model",
+    "supported_providers": ["openai", "xai"],
+    "effective_defaults": {
+      "provider": "xai",
+      "model": "grok-4.5"
+    }
+  }
+}
+```
+
+Provider management changes can alter effective defaults between discovery and submission. The accepted job manifest
+remains authoritative for the exact normalized options and stage requirements of that run.
 
 Defaults are validated and normalized before the run key is calculated. New client requests receive HTTP 201. Replaying the same `Idempotency-Key` and payload returns the original job with HTTP 200; reusing a key for a different payload returns HTTP 409.
 
@@ -141,7 +173,8 @@ records provider-reported `cost_in_usd_ticks` plus normalized `cost_usd`; xAI sp
 execution-time cost estimate. Workers advertise supported provider adapters while the scheduler only claims stages for
 enabled provider connections. Billable usage is persisted immediately after each response, before structured-output and
 evidence validation, so failed stage attempts remain visible even when no artifact is published. xAI is the default for
-new version-2 requests when enabled; otherwise the management-selected enabled default is used.
+new imported local setups; otherwise the management-selected enabled default is used. Pipeline discovery resolves that
+same management default and its configured model overrides into `effective_options`.
 
 Clients may send `pipeline_version` when they require an exact contract. Omitting it selects the latest registered version.
 `GET /v2/pipelines/{name}?version=1` retrieves an older contract that remains registered.

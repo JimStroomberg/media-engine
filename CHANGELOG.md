@@ -2,6 +2,21 @@
 
 All notable Media Engine changes are documented here.
 
+## 0.2.1 - 2026-07-25
+
+### Added
+
+- Production NGINX examples for separate public API and signed-artifact hostnames with HTTP/2 fallback and HTTP/3 over
+  QUIC, plus an optional IP-restricted standalone-worker endpoint, a static no-backend landing page, and
+  Cloudflare/direct-traffic deployment guidance.
+- Linux QUIC tuning examples for eBPF connection routing, worker capacity, bounded socket buffers, VirtIO multiqueue
+  verification, and staged UDP GSO enablement.
+
+### Fixed
+
+- Pipeline discovery now separates unconditional stage requirements from provider alternatives and reports
+  management-resolved effective options, models, and worker capabilities for `understand` version 2.
+
 ## 0.2.0 - 2026-07-23
 
 This is the first pre-stable platform-v2 development release. Its v2 API and schema may still change before the stable

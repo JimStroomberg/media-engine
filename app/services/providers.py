@@ -10,27 +10,18 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import Settings
+from ..domain.pipelines import UNDERSTAND_PROVIDER_MODELS
 from ..persistence.models import ProviderConfig
 from ..security import CredentialCipher, credential_hint
 
-SUPPORTED_PROVIDERS = frozenset({"openai", "xai"})
+SUPPORTED_PROVIDERS = frozenset(UNDERSTAND_PROVIDER_MODELS)
 PROVIDER_BASE_URLS = {
     "openai": "https://api.openai.com/v1",
     "xai": "https://api.x.ai/v1",
 }
 PROVIDER_MODELS = {
-    "openai": {
-        "transcription": "gpt-4o-transcribe-diarize",
-        "planning": "gpt-5.6-terra",
-        "vision": "gpt-5.6-sol",
-        "summary": "gpt-5.6-terra",
-    },
-    "xai": {
-        "transcription": "grok-transcribe",
-        "planning": "grok-4.5",
-        "vision": "grok-4.5",
-        "summary": "grok-4.5",
-    },
+    provider: dict(models)
+    for provider, models in UNDERSTAND_PROVIDER_MODELS.items()
 }
 
 
@@ -268,10 +259,30 @@ class ProviderConfigurationService:
         session: AsyncSession,
         options: dict[str, Any],
     ) -> dict[str, Any]:
-        configs = {
+        return self._resolve_understand_options(
+            await self._enabled_provider_configs(session),
+            options,
+        )
+
+    async def understand_discovery_defaults(
+        self,
+        session: AsyncSession,
+    ) -> tuple[dict[str, Any], set[str]]:
+        configs = await self._enabled_provider_configs(session)
+        return self._resolve_understand_options(configs, {}), set(configs)
+
+    @staticmethod
+    async def _enabled_provider_configs(session: AsyncSession) -> dict[str, ProviderConfig]:
+        return {
             config.provider: config
             for config in await session.scalars(select(ProviderConfig).where(ProviderConfig.enabled.is_(True)))
         }
+
+    @staticmethod
+    def _resolve_understand_options(
+        configs: dict[str, ProviderConfig],
+        options: dict[str, Any],
+    ) -> dict[str, Any]:
         if not configs:
             raise ProviderUnavailable(
                 "No AI provider is configured. Add an OpenAI or xAI connection in management settings and retry."

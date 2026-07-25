@@ -4,21 +4,32 @@ import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from app.api.v2 import JobCreateRequest, parse_source_metadata
-from app.config import Settings
+from app.api.auth import get_credential_cipher
+from app.api.v2 import (
+    JobCreateRequest,
+    database_session,
+    parse_source_metadata,
+    response_from_pipeline,
+    runtime_pipeline_response,
+)
+from app.config import Settings, get_settings
 from app.domain.pipelines import (
     UnsupportedPipeline,
     get_pipeline,
     list_pipelines,
     required_capabilities_for_stage,
 )
+from app.main import app
 from app.persistence.models import Base, Blob
 from app.services.assets import AssetService, StagedUpload
+from app.services.providers import ProviderConfigurationService
 from app.storage.s3 import StoredObject
 
 
@@ -103,11 +114,17 @@ def test_understand_pipeline_uses_provider_neutral_stage_contracts() -> None:
     assert options["vision_provider"] == "xai"
     assert options["summary_provider"] == "xai"
     assert options["planning_provider"] == "xai"
+    assert options["transcription_model"] == "grok-transcribe"
+    assert options["planning_model"] == "grok-4.5"
+    assert options["vision_model"] == "grok-4.5"
+    assert options["summary_model"] == "grok-4.5"
     assert options["analysis_profile"] == "auto"
     assert options["coarse_max_keyframes"] == 12
     assert options["targeted_keyframes"] == 12
     assert options["max_keyframes"] == 24
-    assert pipeline.stage("transcribe").required_capabilities == {"providers": ("openai",)}
+    assert pipeline.stage("transcribe").required_capabilities == {}
+    assert pipeline.stage("transcribe").provider_selection is not None
+    assert pipeline.stage("transcribe").provider_selection.supported_providers == ("openai", "xai")
     assert pipeline.stage("content_plan").depends_on == (
         "probe",
         "subtitle_extract",
@@ -130,24 +147,187 @@ def test_understand_pipeline_uses_provider_neutral_stage_contracts() -> None:
     assert pipeline.stage("summarize").outputs[0].schema_version == "2"
 
 
-def test_understand_v2_normalizes_xai_defaults_and_stage_capabilities() -> None:
+@pytest.mark.parametrize(
+    ("provider", "expected_models"),
+    [
+        (
+            "openai",
+            {
+                "transcription": "gpt-4o-transcribe-diarize",
+                "planning": "gpt-5.6-terra",
+                "vision": "gpt-5.6-sol",
+                "summary": "gpt-5.6-terra",
+            },
+        ),
+        (
+            "xai",
+            {
+                "transcription": "grok-transcribe",
+                "planning": "grok-4.5",
+                "vision": "grok-4.5",
+                "summary": "grok-4.5",
+            },
+        ),
+    ],
+)
+def test_understand_v2_normalizes_provider_defaults_and_stage_capabilities(
+    provider: str,
+    expected_models: dict[str, str],
+) -> None:
     pipeline = get_pipeline("understand", "2")
     options = pipeline.normalize_options(
         {
-            "transcription_provider": "xai",
-            "planning_provider": "xai",
-            "vision_provider": "xai",
-            "summary_provider": "xai",
+            "transcription_provider": provider,
+            "planning_provider": provider,
+            "vision_provider": provider,
+            "summary_provider": provider,
         }
     )
 
-    assert options["transcription_model"] == "grok-transcribe"
-    assert options["planning_model"] == "grok-4.5"
-    assert options["vision_model"] == "grok-4.5"
-    assert options["summary_model"] == "grok-4.5"
+    for stage, expected_model in expected_models.items():
+        assert options[f"{stage}_model"] == expected_model
     assert pipeline.stage("transcribe").processor == "ai_transcribe"
-    assert required_capabilities_for_stage(pipeline.stage("transcribe"), options) == {"providers": ["xai"]}
-    assert required_capabilities_for_stage(pipeline.stage("summarize"), options) == {"providers": ["xai"]}
+    assert required_capabilities_for_stage(pipeline.stage("transcribe"), options) == {"providers": [provider]}
+    assert required_capabilities_for_stage(pipeline.stage("summarize"), options) == {"providers": [provider]}
+
+
+def test_understand_v2_discovery_separates_dynamic_defaults_from_json_schema() -> None:
+    pipeline = get_pipeline("understand", "2")
+    effective_options = pipeline.normalize_options({})
+    discovery = response_from_pipeline(
+        pipeline,
+        effective_options=effective_options,
+        available_providers={"openai", "xai"},
+    )
+
+    for stage in ("transcription", "planning", "vision", "summary"):
+        assert "default" not in discovery.options_schema["properties"][f"{stage}_provider"]
+        assert "default" not in discovery.options_schema["properties"][f"{stage}_model"]
+    assert discovery.effective_options == effective_options
+    assert discovery.available_providers == ["openai", "xai"]
+
+    selectable_stages = [stage for stage in discovery.stages if stage.provider_selection is not None]
+    assert [stage.name for stage in selectable_stages] == [
+        "transcribe",
+        "content_plan",
+        "visual_describe",
+        "summarize",
+    ]
+    for stage in selectable_stages:
+        selection = stage.provider_selection
+        assert selection is not None
+        assert stage.required_capabilities == {}
+        assert selection.effective_defaults.provider in selection.supported_providers
+        assert selection.effective_defaults.provider == effective_options[selection.provider_option]
+        assert selection.effective_defaults.model == effective_options[selection.model_option]
+        assert stage.effective_required_capabilities == {
+            "providers": [selection.effective_defaults.provider]
+        }
+
+
+async def test_understand_v2_runtime_discovery_uses_management_provider_defaults() -> None:
+    pipeline = get_pipeline("understand", "2")
+    configured_models = {
+        "transcription": "configured-openai-transcription",
+        "planning": "configured-openai-planning",
+        "vision": "configured-openai-vision",
+        "summary": "configured-openai-summary",
+    }
+    provider_configs = [
+        SimpleNamespace(provider="openai", is_default=True, models=configured_models),
+        SimpleNamespace(
+            provider="xai",
+            is_default=False,
+            models={
+                "transcription": "grok-transcribe",
+                "planning": "grok-4.5",
+                "vision": "grok-4.5",
+                "summary": "grok-4.5",
+            },
+        ),
+    ]
+    session = SimpleNamespace(scalars=AsyncMock(return_value=provider_configs))
+    provider_service = ProviderConfigurationService(SimpleNamespace(), SimpleNamespace())
+
+    discovery = await runtime_pipeline_response(
+        pipeline,
+        session=session,
+        provider_service=provider_service,
+        available_providers={"openai", "xai"},
+    )
+
+    for stage, configured_model in configured_models.items():
+        assert discovery.effective_options[f"{stage}_provider"] == "openai"
+        assert discovery.effective_options[f"{stage}_model"] == configured_model
+    assert pipeline.normalize_options(discovery.effective_options) == discovery.effective_options
+    for stage in discovery.stages:
+        if stage.provider_selection is not None:
+            assert stage.effective_required_capabilities == {"providers": ["openai"]}
+
+
+def test_pipeline_discovery_contract_is_published_in_openapi() -> None:
+    schemas = app.openapi()["components"]["schemas"]
+
+    assert {
+        "options_schema",
+        "effective_options",
+        "available_providers",
+        "stages",
+    }.issubset(schemas["PipelineResponse"]["properties"])
+    assert {
+        "required_capabilities",
+        "effective_required_capabilities",
+        "provider_selection",
+    }.issubset(schemas["PipelineStageContractResponse"]["properties"])
+    assert {
+        "provider_option",
+        "model_option",
+        "supported_providers",
+        "effective_defaults",
+    }.issubset(schemas["PipelineProviderSelectionResponse"]["properties"])
+
+
+def test_understand_v2_discovery_endpoint_matches_runtime_provider_configuration() -> None:
+    configured_models = {
+        "transcription": "grok-transcribe",
+        "planning": "grok-4.5",
+        "vision": "grok-4.5",
+        "summary": "grok-4.5",
+    }
+    session = SimpleNamespace(
+        scalars=AsyncMock(
+            return_value=[
+                SimpleNamespace(provider="openai", is_default=False, models={}),
+                SimpleNamespace(provider="xai", is_default=True, models=configured_models),
+            ]
+        )
+    )
+
+    async def fake_database_session():
+        yield session
+
+    app.dependency_overrides[database_session] = fake_database_session
+    app.dependency_overrides[get_settings] = lambda: Settings(_env_file=None)
+    app.dependency_overrides[get_credential_cipher] = lambda: SimpleNamespace()
+    try:
+        response = TestClient(app).get("/v2/pipelines/understand?version=2")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    discovery = response.json()
+    assert discovery["available_providers"] == ["openai", "xai"]
+    assert discovery["effective_options"]["transcription_provider"] == "xai"
+    assert discovery["effective_options"]["transcription_model"] == "grok-transcribe"
+    assert "default" not in discovery["options_schema"]["properties"]["transcription_model"]
+    transcribe = next(stage for stage in discovery["stages"] if stage["name"] == "transcribe")
+    assert transcribe["required_capabilities"] == {}
+    assert transcribe["effective_required_capabilities"] == {"providers": ["xai"]}
+    assert transcribe["provider_selection"]["supported_providers"] == ["openai", "xai"]
+    assert transcribe["provider_selection"]["effective_defaults"] == {
+        "provider": "xai",
+        "model": "grok-transcribe",
+    }
 
 
 def test_understand_v1_remains_addressable_as_the_baseline() -> None:
