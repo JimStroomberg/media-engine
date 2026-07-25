@@ -2,6 +2,13 @@
 
 All notable Media Engine changes are documented here.
 
+## Unreleased
+
+### Changed
+
+- Disabled unavailable local build-record uploads and Docker-specific job summaries for Docker Build Cloud while
+  retaining SBOM and provenance attestations.
+
 ## 0.2.2 - 2026-07-25
 
 ### Changed

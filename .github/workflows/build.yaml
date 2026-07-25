@@ -14,6 +14,10 @@ env:
   RK_PLATFORMS: linux/arm64
   CACHE_REF_BASE: jimstro/media-engine:buildcache-base
   CACHE_REF_RK:   jimstro/media-engine:buildcache-rk1
+  # Docker Build Cloud retains remote records itself; the action cannot export
+  # those records as local GitHub artifacts after the remote builder exits.
+  DOCKER_BUILD_RECORD_UPLOAD: "false"
+  DOCKER_BUILD_SUMMARY: "false"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
