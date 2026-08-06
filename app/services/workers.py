@@ -14,6 +14,7 @@ from sqlalchemy.orm import joinedload
 from ..config import Settings
 from ..domain.content import content_addressed_key
 from ..domain.pipelines import PipelineDefinition, get_pipeline
+from ..hardware import normalize_video_codec
 from ..persistence.models import (
     AIUsageEvent,
     Artifact,
@@ -38,6 +39,10 @@ class LeaseLost(RuntimeError):
 
 
 class ArtifactRejected(RuntimeError):
+    pass
+
+
+class LeaseDeclineRejected(RuntimeError):
     pass
 
 
@@ -200,6 +205,75 @@ class WorkerService:
         if refreshed is None:
             raise RuntimeError("Stage disappeared after heartbeat")
         return refreshed
+
+    async def decline_unsupported_input_codec(
+        self,
+        session: AsyncSession,
+        *,
+        worker_id: uuid.UUID,
+        stage_id: uuid.UUID,
+        lease_token: uuid.UUID,
+        input_codec: str,
+    ) -> StageRun:
+        """Return an incompatible transcode lease without consuming an attempt."""
+
+        now = datetime.now(UTC)
+        stage = await self._locked_stage(session, stage_id)
+        self._validate_active_lease(stage, worker_id=worker_id, lease_token=lease_token, now=now)
+        if stage.stage_name != "transcode":
+            raise LeaseDeclineRejected("Only a transcode stage can decline an unsupported input codec")
+        normalized_codec = normalize_video_codec(input_codec)
+        if normalized_codec is None:
+            raise LeaseDeclineRejected("The input codec could not be normalized")
+        existing_requirements = {
+            key: list(values) if isinstance(values, list) else values
+            for key, values in stage.required_capabilities.items()
+        }
+        existing_decoders = existing_requirements.get("decoders", [])
+        if not isinstance(existing_decoders, list):
+            raise LeaseDeclineRejected("The stage has an invalid decoder capability contract")
+        if normalized_codec in existing_decoders:
+            raise LeaseDeclineRejected(
+                f"Stage already requires decoder '{normalized_codec}'; worker capability reporting is inconsistent"
+            )
+
+        existing_requirements["decoders"] = sorted(set(existing_decoders) | {normalized_codec})
+        stage.required_capabilities = existing_requirements
+        stage.status = "queued"
+        stage.attempt = max(0, stage.attempt - 1)
+        stage.lease_owner_id = None
+        stage.lease_token = None
+        stage.lease_expires_at = None
+        stage.heartbeat_at = now
+        stage.progress = None
+        stage.error_message = (
+            f"unsupported_input_codec: waiting for a worker that advertises decoder '{normalized_codec}'"
+        )
+        if stage.attempt == 0:
+            stage.started_at = None
+
+        run = await session.get(PipelineRun, stage.pipeline_run_id, with_for_update=True)
+        if run is None:
+            raise RuntimeError("Pipeline run disappeared while declining a stage")
+        await session.flush()
+        run.status = await self._derive_run_status(session, run.id)
+        request_status = "running" if run.status == "running" else "queued"
+        await session.execute(
+            update(JobRequest)
+            .where(
+                JobRequest.pipeline_run_id == run.id,
+                JobRequest.status.in_({"queued", "running"}),
+            )
+            .values(status=request_status, updated_at=now)
+        )
+        await session.execute(
+            update(Worker).where(Worker.id == worker_id).values(last_seen_at=now, status="online", updated_at=now)
+        )
+        await session.commit()
+        declined = await self.get_stage(session, stage_id)
+        if declined is None:
+            raise RuntimeError("Stage disappeared after its lease was declined")
+        return declined
 
     async def complete(
         self,

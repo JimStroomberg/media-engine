@@ -50,6 +50,11 @@ class Settings(BaseSettings):
         ge=30,
         description="Maximum time for one worker media or OCR command",
     )
+    media_no_progress_timeout_seconds: int = Field(
+        120,
+        ge=15,
+        description="Maximum time a media command may run without producing progress",
+    )
     tesseract_command: str = Field("tesseract", description="Executable used for local OCR")
 
     require_rk_accel: bool = Field(

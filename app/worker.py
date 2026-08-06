@@ -55,6 +55,7 @@ class MediaWorker:
         self.settings = settings
         self.worker_token = worker_token
         self.engine = TranscodeEngine()
+        self.capabilities = detected_worker_capabilities(settings)
         self.local_processor = LocalMediaProcessor(
             ffmpeg_command=settings.ffmpeg_command,
             ffprobe_command=settings.ffprobe_command,
@@ -103,7 +104,7 @@ class MediaWorker:
 
     async def _register_until_ready(self, client: httpx.AsyncClient) -> None:
         payload = {
-            "capabilities": detected_worker_capabilities(self.settings),
+            "capabilities": self.capabilities,
             "runtime": detected_worker_runtime(self.settings, version=__version__),
         }
         while not self._shutdown.is_set():
@@ -155,7 +156,7 @@ class MediaWorker:
         output_dir = stage_root / "output"
         input_dir.mkdir(parents=True, exist_ok=True)
         output_dir.mkdir(parents=True, exist_ok=True)
-        record: WorkerStageRecord | None = None
+        record = WorkerStageRecord(job_id=stage_id, source_path=input_dir / "source.media")
         produced: list[ProducedArtifact] = []
         stop_heartbeat = asyncio.Event()
         lease_lost = asyncio.Event()
@@ -164,9 +165,6 @@ class MediaWorker:
         usage_events: list[ProviderUsageEvent] = []
 
         try:
-            inputs = await self._download_inputs(transfer_client, claim, input_dir)
-            source = inputs["source"]
-            record = WorkerStageRecord(job_id=stage_id, source_path=source.path)
             heartbeat_task = asyncio.create_task(
                 self._heartbeat_loop(
                     client,
@@ -178,8 +176,22 @@ class MediaWorker:
                 ),
                 name=f"stage-heartbeat-{stage_id}",
             )
+            inputs = await self._download_inputs(transfer_client, claim, input_dir)
+            source = inputs["source"]
+            record.source_path = source.path
 
             processor = claim["processor"]
+            if processor == "transcode":
+                unsupported_codec = await self._unsupported_input_codec(source.path, claim["options"])
+                if unsupported_codec is not None:
+                    stop_heartbeat.set()
+                    await self._decline_claim(
+                        client,
+                        stage_id=stage_id,
+                        lease_token=lease_token,
+                        input_codec=unsupported_codec,
+                    )
+                    return
             with capture_provider_usage() as usage_events:
                 if processor == "transcode":
                     produced = [await self._transcode(record, claim, output_dir)]
@@ -282,8 +294,7 @@ class MediaWorker:
             )
         finally:
             stop_heartbeat.set()
-            if record is not None:
-                record.cancel_requested = True
+            record.cancel_requested = True
             if heartbeat_task is not None:
                 heartbeat_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -390,6 +401,41 @@ class MediaWorker:
             path=destination,
             media_type=media_type,
             format=destination.suffix.lstrip("."),
+        )
+
+    async def _unsupported_input_codec(self, source_path: Path, options: dict[str, Any]) -> str | None:
+        if options.get("quality") == QualityTarget.audio_only.value:
+            return None
+        if self.settings.worker_backend not in {"rkmpp", "nvv4l2"} or self.settings.allow_cpu_fallback:
+            return None
+        input_codec = await asyncio.to_thread(self.engine.input_codec, source_path)
+        if input_codec is None:
+            return None
+        supported_decoders = set(self.capabilities.get("decoders", []))
+        return input_codec if input_codec not in supported_decoders else None
+
+    @staticmethod
+    async def _decline_claim(
+        client: httpx.AsyncClient,
+        *,
+        stage_id: str,
+        lease_token: str,
+        input_codec: str,
+    ) -> None:
+        response = await client.post(
+            f"/v2/internal/stages/{stage_id}/decline",
+            json={
+                "lease_token": lease_token,
+                "reason_code": "unsupported_input_codec",
+                "input_codec": input_codec,
+            },
+        )
+        if response.status_code == 409:
+            raise WorkerLeaseLost(response.text)
+        response.raise_for_status()
+        logger.info(
+            "Stage lease declined without consuming an attempt",
+            extra={"stage_id": stage_id, "reason_code": "unsupported_input_codec", "input_codec": input_codec},
         )
 
     async def _heartbeat_loop(

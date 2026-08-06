@@ -140,6 +140,7 @@ def run_self_tests() -> list[SelfTestResult]:
             "nvv4l2h265enc",
             "nvvidconv",
             "nvcompositor",
+            "watchdog",
             "h264parse",
             "h265parse",
             "qtmux",

@@ -4,6 +4,26 @@ All notable Media Engine changes are documented here.
 
 ## Unreleased
 
+## 0.4.1 - 2026-08-06
+
+### Added
+
+- Codec-aware transcode routing: workers advertise detected input decoders, and a hardware worker can return an
+  incompatible lease with a structured `unsupported_input_codec` reason without consuming a processing attempt.
+- Hard media-command and no-progress watchdogs. Jetson pipelines use GStreamer's buffer watchdog, while every
+  transcode subprocess has a bounded total runtime.
+
+### Changed
+
+- Worker heartbeats now begin before signed input downloads, so large transfers retain their lease.
+- Job details in the management dashboard show the effective capability requirements learned during routing.
+
+### Fixed
+
+- Jetson Xavier NX workers reject AV1 and other unsupported NVDEC inputs before launching GStreamer instead of allowing
+  `uridecodebin` to select `nvv4l2decoder` and stall indefinitely. The scheduler can then route AV1 to a compatible RK1
+  or CPU worker.
+
 ## 0.4.0 - 2026-08-06
 
 ### Added

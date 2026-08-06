@@ -124,6 +124,12 @@ flowchart LR
 
 Workers report capabilities rather than platform names alone. Routing considers decoder, encoder, maximum resolution, hardware backend, filters, pipeline stages, and configured fallback policy.
 
+Source codecs are learned from the media itself rather than trusted client metadata. When a strict hardware worker
+probes an unsupported source codec, it returns that lease without consuming an attempt. The control plane persists the
+normalized decoder requirement on the stage, so subsequent claims are limited to compatible workers. A deployment with
+no compatible decoder leaves the stage safely queued with an actionable dashboard reason instead of repeatedly running
+the same failing hardware path.
+
 Hardware- and vendor-specific implementations live behind focused interfaces such as `TranscodeBackend`,
 `TranscriptionProvider`, `ContentPlanningProvider`, `VisionProvider`, `SummaryProvider`, `OcrProvider`, and future
 `EmbeddingProvider` implementations. The control plane stores vendor credentials with authenticated encryption and

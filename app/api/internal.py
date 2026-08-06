@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -18,6 +18,7 @@ from ..services.worker_access import WorkerAccessService, WorkerPrincipal
 from ..services.workers import (
     ArtifactCompletion,
     ArtifactRejected,
+    LeaseDeclineRejected,
     LeaseLost,
     UsageCompletion,
     WorkerNotFound,
@@ -186,6 +187,14 @@ class StageFailRequest(BaseModel):
     lease_token: uuid.UUID
     error_message: str = Field(min_length=1, max_length=4000)
     usage_events: list[ProviderUsageRequest] = Field(default_factory=list, max_length=100)
+
+
+class StageDeclineRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    lease_token: uuid.UUID
+    reason_code: Literal["unsupported_input_codec"]
+    input_codec: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9_.+-]+$")
 
 
 class StageStatusResponse(BaseModel):
@@ -441,4 +450,28 @@ async def fail_stage(
         )
     except LeaseLost as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return stage_response(stage)
+
+
+@router.post("/stages/{stage_id}/decline", response_model=StageStatusResponse)
+async def decline_stage(
+    stage_id: uuid.UUID,
+    payload: StageDeclineRequest,
+    principal: Annotated[WorkerPrincipal, Depends(require_worker_auth)],
+    settings: Settings = Depends(get_settings),
+    session: AsyncSession = Depends(database_session),
+    store: S3Store = Depends(get_s3_store),
+) -> StageStatusResponse:
+    try:
+        stage = await WorkerService(settings, store).decline_unsupported_input_codec(
+            session,
+            worker_id=principal.worker_id,
+            stage_id=stage_id,
+            lease_token=payload.lease_token,
+            input_codec=payload.input_codec,
+        )
+    except LeaseLost as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except LeaseDeclineRejected as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return stage_response(stage)

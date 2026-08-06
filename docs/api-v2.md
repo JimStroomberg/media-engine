@@ -285,10 +285,18 @@ Client requests may supply an idempotency key and client job ID. Idempotency pre
 - `POST /v2/internal/workers/register`: idempotently register identity and capabilities;
 - `POST /v2/internal/stages/claim`: atomically claim a compatible queued stage;
 - `POST /v2/internal/stages/{id}/heartbeat`: extend a lease and report progress;
+- `POST /v2/internal/stages/{id}/decline`: return an unsupported input codec to the queue, add its decoder capability
+  requirement, and restore the attempt count;
 - `POST /v2/internal/stages/{id}/artifacts/prepare-upload`: validate an output declaration and return a short-lived signed
   S3 PUT URL when the content-addressed object is not already available;
 - `POST /v2/internal/stages/{id}/complete`: atomically publish one or more declared S3 artifacts and advance the DAG;
 - `POST /v2/internal/stages/{id}/fail`: release for retry or fail after the attempt limit.
+
+The decline contract currently accepts only the structured `unsupported_input_codec` reason and a normalized codec
+name. It is not a generic worker-controlled mutation surface. The server keeps the stage queued, records a readable
+reason, and adds `decoders: [<codec>]` to its required capabilities. Subsequent claims therefore go only to workers that
+advertised that decoder. If a stage already required the decoder, another decline is rejected because it indicates an
+inconsistent worker capability report.
 
 Internal endpoints require an individually issued `mew_...` bearer token and are not part of the public product API. The
 token determines the worker identity; request bodies never select a worker ID. Workers receive signed S3 transfer URLs

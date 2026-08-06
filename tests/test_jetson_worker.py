@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
+
+import pytest
 
 from app import hardware
 from app.config import Settings
 from app.models import CodecPreference, JobStatus, QualityTarget
 from app.transcode import engine as engine_module
-from app.transcode.engine import TranscodeEngine
+from app.transcode.engine import MediaCommandTimeout, TranscodeEngine, UnsupportedInputCodec
 from app.transcode.probe import MediaInfo, MediaStreamInfo
 from app.transcode.profiles import PROFILES
 
@@ -17,6 +20,7 @@ def jetson_settings() -> Settings:
         _env_file=None,
         worker_backend="nvv4l2",
         worker_profile="jetson-xavier-nx",
+        allow_cpu_fallback=False,
     )
 
 
@@ -107,6 +111,51 @@ def test_jetson_codec_selection_normalizes_mjpeg(monkeypatch) -> None:
     assert encoder == "nvv4l2h265enc"
 
 
+def test_video_codec_capabilities_are_normalized_from_ffmpeg(monkeypatch) -> None:
+    output = """
+ DEV.LS h264 H.264
+ DEV.L. hevc H.265
+ D.V.L. av1 Alliance for Open Media AV1
+ DEA.L. aac AAC audio
+"""
+    monkeypatch.setattr(hardware.shutil, "which", lambda _name: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(hardware.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(stdout=output))
+
+    assert hardware.ffmpeg_video_decoders(Settings(_env_file=None)) == ["av1", "h264", "h265"]
+
+
+def test_rkmpp_capabilities_report_only_present_hardware_decoders(monkeypatch) -> None:
+    output = """
+ V..... av1_rkmpp Rockchip AV1 decoder
+ V..... h264_rkmpp Rockchip H.264 decoder
+ V..... hevc_rkmpp Rockchip HEVC decoder
+ V..... vp9 Generic VP9 decoder
+"""
+    monkeypatch.setattr(hardware.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(hardware.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(stdout=output))
+
+    capabilities = hardware.detected_worker_capabilities(
+        Settings(_env_file=None, worker_backend="rkmpp", allow_cpu_fallback=False)
+    )
+
+    assert capabilities["decoders"] == ["av1", "h264", "h265"]
+
+
+def test_jetson_rejects_unsupported_input_before_pipeline_start() -> None:
+    transcode_engine = TranscodeEngine.__new__(TranscodeEngine)
+    transcode_engine.settings = jetson_settings()
+    media = MediaInfo(
+        container="matroska",
+        bit_rate=None,
+        duration=1.0,
+        video=MediaStreamInfo(codec_type="video", codec_name="av1", width=1920, height=1080),
+        audio=None,
+    )
+
+    with pytest.raises(UnsupportedInputCodec, match="unsupported_input_codec.*av1"):
+        transcode_engine._validate_backend_input_codec(media)
+
+
 def test_jetson_pipeline_converts_compositor_rgba_output_for_nvenc(monkeypatch, tmp_path) -> None:
     transcode_engine = TranscodeEngine.__new__(TranscodeEngine)
     transcode_engine.settings = jetson_settings()
@@ -145,9 +194,55 @@ def test_jetson_pipeline_converts_compositor_rgba_output_for_nvenc(monkeypatch, 
     )
 
     command = captured["gstreamer"]
+    assert command[command.index("watchdog") + 1] == "timeout=120000"
     rgba_index = command.index("video/x-raw(memory:NVMM),format=RGBA,width=848,height=480")
     nv12_index = command.index("video/x-raw(memory:NVMM),format=NV12,width=848,height=480")
     assert command[rgba_index + 2] == "nvvidconv"
     assert rgba_index < nv12_index < command.index("nvv4l2h265enc")
     assert "hvc1" in captured["ffmpeg"]
     assert destination.read_bytes() == b"muxed"
+
+
+def test_gstreamer_hard_timeout_terminates_the_process(monkeypatch) -> None:
+    process = Mock()
+    process.poll.side_effect = lambda: 0 if process.terminate.called else None
+    process.stdout = Mock()
+    process.stdout.close.return_value = None
+    process.wait.return_value = 0
+    transcode_engine = TranscodeEngine.__new__(TranscodeEngine)
+    transcode_engine.settings = Settings(
+        _env_file=None,
+        media_command_timeout_seconds=30,
+        media_no_progress_timeout_seconds=15,
+    )
+    monotonic = iter([0.0, 31.0])
+    monkeypatch.setattr(engine_module.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(engine_module.time, "monotonic", lambda: next(monotonic))
+
+    with pytest.raises(MediaCommandTimeout, match="media_command_timeout"):
+        transcode_engine._run_gstreamer(["gst-launch-1.0"], action="test", env={})
+
+    process.terminate.assert_called_once()
+
+
+def test_ffmpeg_no_progress_timeout_terminates_the_process(monkeypatch) -> None:
+    process = Mock()
+    process.poll.side_effect = lambda: 0 if process.terminate.called else None
+    process.stdout = Mock()
+    process.stdout.close.return_value = None
+    process.wait.return_value = 0
+    transcode_engine = TranscodeEngine.__new__(TranscodeEngine)
+    transcode_engine.settings = Settings(
+        _env_file=None,
+        media_command_timeout_seconds=60,
+        media_no_progress_timeout_seconds=15,
+    )
+    monotonic = iter([0.0, 0.0, 16.0])
+    monkeypatch.setattr(engine_module.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(engine_module.select, "select", lambda *_args, **_kwargs: ([], [], []))
+    monkeypatch.setattr(engine_module.time, "monotonic", lambda: next(monotonic))
+
+    with pytest.raises(MediaCommandTimeout, match="media_no_progress_timeout"):
+        transcode_engine._run_ffmpeg(["ffmpeg"], action="test")
+
+    process.terminate.assert_called_once()

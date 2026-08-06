@@ -2,7 +2,7 @@ name: media-engine-worker-rk1
 
 services:
   worker:
-    image: ${MEDIA_ENGINE_WORKER_IMAGE:-jimstro/media-engine:rk1-0.4.0}
+    image: ${MEDIA_ENGINE_WORKER_IMAGE:-jimstro/media-engine:rk1-0.4.1}
     pull_policy: ${MEDIA_ENGINE_WORKER_PULL_POLICY:-always}
     hostname: ${MEDIA_ENGINE_WORKER_HOSTNAME:-media-engine-worker-rk1}
     restart: unless-stopped

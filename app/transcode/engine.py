@@ -6,13 +6,14 @@ import os
 import select
 import shutil
 import subprocess
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from ..config import get_settings
-from ..hardware import JETSON_DECODERS, gstreamer_feature_available
+from ..hardware import JETSON_DECODERS, gstreamer_feature_available, normalize_video_codec
 from ..models import CodecPreference, JobRequest, JobStatus, QualityTarget
 from ..transcode.probe import MediaInfo, ProbeError, probe_media
 from ..transcode.profiles import QualityProfile, choose_profile
@@ -32,6 +33,17 @@ class TranscodeCancelled(RuntimeError):
     pass
 
 
+class MediaCommandTimeout(RuntimeError):
+    pass
+
+
+class UnsupportedInputCodec(RuntimeError):
+    def __init__(self, codec: str, backend: str) -> None:
+        self.codec = codec
+        self.backend = backend
+        super().__init__(f"unsupported_input_codec: {backend} cannot decode input codec '{codec}'")
+
+
 class TranscodeEngine:
     def __init__(self) -> None:
         self.settings = get_settings()
@@ -41,6 +53,12 @@ class TranscodeEngine:
     async def process(self, record, request: JobRequest) -> TranscodeResult:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._process_sync, record, request)
+
+    def input_codec(self, source_path: Path) -> str | None:
+        """Probe and normalize the source video codec for worker routing."""
+
+        info = self._probe(source_path)
+        return normalize_video_codec(info.video.codec_name if info.video else None)
 
     def _process_sync(self, record, request: JobRequest) -> TranscodeResult:
         source_path = record.source_path
@@ -101,6 +119,7 @@ class TranscodeEngine:
             self._remux(record, source_path, work_output)
             remuxed = True
         else:
+            self._validate_backend_input_codec(info)
             hardware_backend, decoder, encoder = self._select_hardware_codecs(info, target_codec)
             if self.settings.require_jetson_accel and self.settings.worker_backend == "nvv4l2" and not hardware_backend:
                 raise RuntimeError(f"Required Jetson hardware encoder is unavailable for codec {target_codec.value}")
@@ -484,6 +503,9 @@ class TranscodeEngine:
             "!",
             "queue",
             "!",
+            "watchdog",
+            f"timeout={self.settings.media_no_progress_timeout_seconds * 1000}",
+            "!",
             "nvvidconv",
             "compute-hw=0",
             "interpolation-method=2",
@@ -593,11 +615,18 @@ class TranscodeEngine:
             env=env,
         )
         output_lines: list[str] = []
+        started_at = time.monotonic()
         try:
             while process.poll() is None:
                 if should_cancel and should_cancel():
                     self._terminate_process(process, action)
                     raise TranscodeCancelled(f"GStreamer {action} cancelled")
+                if time.monotonic() - started_at >= self.settings.media_command_timeout_seconds:
+                    self._terminate_process(process, action)
+                    raise MediaCommandTimeout(
+                        f"media_command_timeout: GStreamer {action} exceeded "
+                        f"{self.settings.media_command_timeout_seconds}s"
+                    )
                 if not process.stdout:
                     continue
                 ready, _, _ = select.select([process.stdout], [], [], 1.0)
@@ -620,6 +649,11 @@ class TranscodeEngine:
                 output_data.strip(),
                 extra={"action": action, "gstreamer_output": output_data},
             )
+            if "watchdog triggered" in output_data.lower():
+                raise MediaCommandTimeout(
+                    f"media_no_progress_timeout: GStreamer {action} produced no frames for "
+                    f"{self.settings.media_no_progress_timeout_seconds}s"
+                )
             raise RuntimeError(f"GStreamer {action} failed")
 
     def _output_matches_profile(
@@ -667,11 +701,26 @@ class TranscodeEngine:
             env=env,
         )
         output_lines: list[str] = []
+        started_at = time.monotonic()
+        last_progress_at = started_at
         try:
             while process.poll() is None:
                 if should_cancel and should_cancel():
                     self._terminate_process(process, action)
                     raise TranscodeCancelled(f"ffmpeg {action} cancelled")
+                now = time.monotonic()
+                if now - started_at >= self.settings.media_command_timeout_seconds:
+                    self._terminate_process(process, action)
+                    raise MediaCommandTimeout(
+                        f"media_command_timeout: ffmpeg {action} exceeded "
+                        f"{self.settings.media_command_timeout_seconds}s"
+                    )
+                if now - last_progress_at >= self.settings.media_no_progress_timeout_seconds:
+                    self._terminate_process(process, action)
+                    raise MediaCommandTimeout(
+                        f"media_no_progress_timeout: ffmpeg {action} made no progress for "
+                        f"{self.settings.media_no_progress_timeout_seconds}s"
+                    )
 
                 if not process.stdout:
                     continue
@@ -683,7 +732,8 @@ class TranscodeEngine:
                 line = process.stdout.readline()
                 if not line:
                     continue
-                self._handle_ffmpeg_output_line(line, output_lines, progress_handler)
+                if self._handle_ffmpeg_output_line(line, output_lines, progress_handler):
+                    last_progress_at = time.monotonic()
 
             if process.stdout:
                 for line in process.stdout:
@@ -708,24 +758,27 @@ class TranscodeEngine:
         line: str,
         output_lines: list[str],
         progress_handler: Callable[[float], None] | None,
-    ) -> None:
-        if progress_handler and line.startswith("out_time_ms="):
+    ) -> bool:
+        if line.startswith("out_time_ms="):
             try:
                 microseconds = int(line.strip().split("=", 1)[1])
                 seconds = microseconds / 1_000_000
-                progress_handler(seconds)
+                if progress_handler:
+                    progress_handler(seconds)
+                return True
             except ValueError:
-                return
+                return False
         elif not line.startswith(("frame=", "fps=", "stream_", "progress=", "bitrate=", "total_size=", "out_time_")):
             output_lines.append(line)
+        return False
 
     def _terminate_process(self, process: subprocess.Popen[str], action: str) -> None:
-        logger.info("Terminating ffmpeg", extra={"action": action})
+        logger.info("Terminating media command", extra={"action": action})
         process.terminate()
         try:
             process.wait(timeout=10)
         except subprocess.TimeoutExpired:
-            logger.warning("Killing unresponsive ffmpeg", extra={"action": action})
+            logger.warning("Killing unresponsive media command", extra={"action": action})
             process.kill()
             process.wait(timeout=10)
 
@@ -795,19 +848,17 @@ class TranscodeEngine:
             return False, "", ""
         decoder = ""
         source_codec = (info.video.codec_name or "").lower() if info.video else ""
-        normalized_codec = {
-            "avc1": "h264",
-            "avc": "h264",
-            "hevc": "h265",
-            "hvc1": "h265",
-            "mjpeg": "jpeg",
-        }.get(
-            source_codec,
-            source_codec,
-        )
+        normalized_codec = normalize_video_codec(source_codec)
         if normalized_codec in JETSON_DECODERS and gstreamer_feature_available(self.settings, "nvv4l2decoder"):
             decoder = "nvv4l2decoder"
-        return True, decoder, encoder
+        return bool(decoder), decoder, encoder
+
+    def _validate_backend_input_codec(self, info: MediaInfo) -> None:
+        if self.settings.worker_backend != "nvv4l2" or self.settings.allow_cpu_fallback or not info.video:
+            return
+        codec = normalize_video_codec(info.video.codec_name) or "unknown"
+        if codec not in JETSON_DECODERS:
+            raise UnsupportedInputCodec(codec, "Jetson NVDEC")
 
     def _rkmpp_decoder_name(self, codec_name: str) -> str | None:
         codec = codec_name.lower()

@@ -11,14 +11,15 @@ import pytest
 from app.api.internal import (
     ArtifactCompletionRequest,
     ArtifactUploadPrepareResponse,
+    StageDeclineRequest,
     StageHeartbeatRequest,
     StageSourceResponse,
 )
 from app.config import Settings
-from app.persistence.models import Worker
+from app.persistence.models import PipelineRun, StageRun, Worker
 from app.security import generate_worker_token
 from app.services.worker_access import WorkerAccessService, WorkerConflict, WorkerRemovalConflict
-from app.services.workers import WorkerService, capabilities_satisfy
+from app.services.workers import LeaseDeclineRejected, WorkerService, capabilities_satisfy
 from app.storage.s3 import S3Store
 from app.worker import MediaWorker
 
@@ -255,6 +256,93 @@ def test_worker_protocol_derives_identity_and_hides_storage_coordinates() -> Non
     assert "bucket" not in StageSourceResponse.model_fields
     assert "object_key" not in StageSourceResponse.model_fields
     assert "object_key" not in ArtifactUploadPrepareResponse.model_fields
+    assert StageDeclineRequest.model_validate(
+        {
+            "lease_token": str(uuid.uuid4()),
+            "reason_code": "unsupported_input_codec",
+            "input_codec": "av1",
+        }
+    ).input_codec == "av1"
+
+
+@pytest.mark.asyncio
+async def test_declining_unsupported_codec_adds_requirement_without_spending_attempt() -> None:
+    worker_id = uuid.uuid4()
+    lease_token = uuid.uuid4()
+    run = PipelineRun(id=uuid.uuid4(), status="running")
+    stage = StageRun(
+        id=uuid.uuid4(),
+        pipeline_run_id=run.id,
+        stage_name="transcode",
+        status="running",
+        required_capabilities={"encoders": ["h265"]},
+        priority=0,
+        attempt=1,
+        max_attempts=3,
+        lease_owner_id=worker_id,
+        lease_token=lease_token,
+        lease_expires_at=datetime.now(UTC) + timedelta(minutes=1),
+        heartbeat_at=datetime.now(UTC),
+        progress=0.0,
+        started_at=datetime.now(UTC),
+    )
+    session = AsyncMock()
+    session.scalar.side_effect = [stage, stage]
+    session.get.return_value = run
+    session.scalars.return_value = ["queued"]
+
+    declined = await WorkerService(Settings(_env_file=None), object()).decline_unsupported_input_codec(
+        session,
+        worker_id=worker_id,
+        stage_id=stage.id,
+        lease_token=lease_token,
+        input_codec="av1",
+    )
+
+    assert declined is stage
+    assert stage.status == "queued"
+    assert stage.attempt == 0
+    assert stage.required_capabilities == {"encoders": ["h265"], "decoders": ["av1"]}
+    assert stage.lease_owner_id is None
+    assert stage.lease_token is None
+    assert stage.started_at is None
+    assert stage.error_message == "unsupported_input_codec: waiting for a worker that advertises decoder 'av1'"
+    assert run.status == "queued"
+    session.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_decline_rejects_a_codec_already_required_by_the_lease() -> None:
+    worker_id = uuid.uuid4()
+    lease_token = uuid.uuid4()
+    stage = StageRun(
+        id=uuid.uuid4(),
+        pipeline_run_id=uuid.uuid4(),
+        stage_name="transcode",
+        status="running",
+        required_capabilities={"decoders": ["av1"]},
+        priority=0,
+        attempt=1,
+        max_attempts=3,
+        lease_owner_id=worker_id,
+        lease_token=lease_token,
+        lease_expires_at=datetime.now(UTC) + timedelta(minutes=1),
+        heartbeat_at=datetime.now(UTC),
+        progress=0.0,
+    )
+    session = AsyncMock()
+    session.scalar.return_value = stage
+
+    with pytest.raises(LeaseDeclineRejected, match="already requires decoder"):
+        await WorkerService(Settings(_env_file=None), object()).decline_unsupported_input_codec(
+            session,
+            worker_id=worker_id,
+            stage_id=stage.id,
+            lease_token=lease_token,
+            input_codec="av1",
+        )
+
+    session.commit.assert_not_awaited()
 
 
 def test_artifact_url_uses_client_reachable_s3_endpoint() -> None:
@@ -363,3 +451,46 @@ async def test_worker_shutdown_wakes_an_idle_poll_immediately() -> None:
 
     await asyncio.wait_for(worker._wait_for_poll(), timeout=0.1)
     assert worker._shutdown.is_set()
+
+
+@pytest.mark.asyncio
+async def test_strict_hardware_worker_declines_an_unadvertised_input_codec(tmp_path) -> None:
+    worker = object.__new__(MediaWorker)
+    worker.settings = Settings(
+        _env_file=None,
+        worker_backend="nvv4l2",
+        allow_cpu_fallback=False,
+    )
+    worker.capabilities = {"decoders": ["h264", "h265"]}
+    worker.engine = AsyncMock()
+    worker.engine.input_codec = lambda _path: "av1"
+
+    unsupported = await worker._unsupported_input_codec(tmp_path / "source.mkv", {"quality": "1080p"})
+
+    assert unsupported == "av1"
+
+
+@pytest.mark.asyncio
+async def test_worker_decline_uses_structured_reason_without_failure_payload() -> None:
+    client = AsyncMock()
+    client.post.return_value = httpx.Response(
+        200,
+        json={"status": "queued"},
+        request=httpx.Request("POST", "https://media.example.test/v2/internal/stages/id/decline"),
+    )
+
+    await MediaWorker._decline_claim(
+        client,
+        stage_id="stage-id",
+        lease_token="lease-token",
+        input_codec="av1",
+    )
+
+    client.post.assert_awaited_once_with(
+        "/v2/internal/stages/stage-id/decline",
+        json={
+            "lease_token": "lease-token",
+            "reason_code": "unsupported_input_codec",
+            "input_codec": "av1",
+        },
+    )

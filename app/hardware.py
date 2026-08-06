@@ -12,6 +12,71 @@ from typing import Any
 from .config import Settings
 
 JETSON_DECODERS = ("h264", "h265", "jpeg", "vp8", "vp9", "mpeg2", "mpeg4")
+CODEC_ALIASES = {
+    "avc": "h264",
+    "avc1": "h264",
+    "hevc": "h265",
+    "hvc1": "h265",
+    "mjpeg": "jpeg",
+    "mjpegb": "jpeg",
+    "mpeg2video": "mpeg2",
+}
+
+
+def normalize_video_codec(codec_name: str | None) -> str | None:
+    """Return the stable capability name used for an ffprobe video codec."""
+
+    if not codec_name:
+        return None
+    codec = codec_name.strip().lower()
+    return CODEC_ALIASES.get(codec, codec) or None
+
+
+def ffmpeg_video_decoders(settings: Settings) -> list[str]:
+    """Return video codecs that the configured FFmpeg build can decode."""
+
+    output = _query_ffmpeg(settings, "-codecs")
+    decoders: set[str] = set()
+    for line in output.splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        flags = parts[0]
+        if len(flags) < 3 or flags[0] != "D" or flags[2] != "V":
+            continue
+        if codec := normalize_video_codec(parts[1]):
+            decoders.add(codec)
+    return sorted(decoders)
+
+
+def rkmpp_video_decoders(settings: Settings) -> list[str]:
+    """Return codecs backed by an actual RKMPP decoder in the FFmpeg build."""
+
+    output = _query_ffmpeg(settings, "-decoders")
+    decoders: set[str] = set()
+    for line in output.splitlines():
+        parts = line.split()
+        if len(parts) < 2 or not parts[1].lower().endswith("_rkmpp"):
+            continue
+        if codec := normalize_video_codec(parts[1].lower().removesuffix("_rkmpp")):
+            decoders.add(codec)
+    return sorted(decoders)
+
+
+def _query_ffmpeg(settings: Settings, flag: str) -> str:
+    ffmpeg = shutil.which(settings.ffmpeg_command)
+    if ffmpeg is None:
+        return ""
+    try:
+        return subprocess.run(
+            [ffmpeg, "-hide_banner", "-loglevel", "quiet", flag],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=settings.ffprobe_timeout_seconds,
+        ).stdout
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return ""
 
 
 def gstreamer_feature_available(settings: Settings, feature: str) -> bool:
@@ -47,10 +112,18 @@ def detected_worker_capabilities(settings: Settings) -> dict[str, list[str]]:
     }
 
     if settings.worker_backend == "rkmpp":
+        decoders = rkmpp_video_decoders(settings)
+        if settings.allow_cpu_fallback:
+            decoders = sorted(set(decoders) | set(ffmpeg_video_decoders(settings)))
+        if decoders:
+            capabilities["decoders"] = decoders
         capabilities["accelerators"] = ["rkmpp", "rga"]
         return capabilities
 
     if settings.worker_backend != "nvv4l2":
+        decoders = ffmpeg_video_decoders(settings)
+        if decoders:
+            capabilities["decoders"] = decoders
         return capabilities
 
     processors.append("gstreamer")
@@ -65,6 +138,10 @@ def detected_worker_capabilities(settings: Settings) -> dict[str, list[str]]:
     if gstreamer_feature_available(settings, "nvv4l2decoder") and Path("/dev/nvhost-nvdec").exists():
         capabilities["decoders"] = list(JETSON_DECODERS)
         accelerators.append("nvdec")
+    if settings.allow_cpu_fallback:
+        capabilities["decoders"] = sorted(
+            set(capabilities.get("decoders", [])) | set(ffmpeg_video_decoders(settings))
+        )
     if encoders and Path("/dev/nvhost-msenc").exists():
         accelerators.append("nvenc")
     if gstreamer_feature_available(settings, "nvvidconv") and Path("/dev/nvhost-vic").exists():

@@ -35,6 +35,7 @@
 - [x] Add standalone CPU/RK1 worker Compose deployments with minimal configuration and multi-host documentation.
 - [x] Replace shared worker authentication with individually revocable, identity-bound worker tokens.
 - [x] Replace permanent worker S3 credentials with short-lived signed downloads and uploads.
+- [x] Add detected decoder capabilities and no-attempt lease return for unsupported input codecs.
 - [ ] Validate the RKMPP worker end to end on an RK1 host.
 
 ## Phase 3: artifact pipelines
@@ -58,7 +59,7 @@
 
 ## Phase 5: additional hardware
 
-- [ ] Add NVIDIA NVENC/NVDEC worker images and capability probes.
+- [x] Add NVIDIA NVENC/NVDEC worker images and capability probes.
 - [ ] Evaluate Intel VAAPI and Apple VideoToolbox where deployment demand exists.
 - [ ] Add scheduling policy based on capability, health, preference, and fallback cost.
 

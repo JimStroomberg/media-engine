@@ -135,6 +135,8 @@ Environment variables (prefixed with `MEDIA_ENGINE_`):
 | `MEDIA_ENGINE_REQUIRE_RK_ACCEL` | `false` | Fail startup when RKMPP hardware acceleration is expected but missing |
 | `MEDIA_ENGINE_REQUIRE_JETSON_ACCEL` | `false` | Fail startup unless the Jetson GStreamer plugins, devices, and encode/decode probe succeed |
 | `MEDIA_ENGINE_FFPROBE_TIMEOUT_SECONDS` | `30` | Maximum time allowed for media probing |
+| `MEDIA_ENGINE_MEDIA_COMMAND_TIMEOUT_SECONDS` | `1800` | Hard runtime limit for one transcode/media command |
+| `MEDIA_ENGINE_MEDIA_NO_PROGRESS_TIMEOUT_SECONDS` | `120` | Stop a transcode that produces no progress for this many seconds |
 | `MEDIA_ENGINE_DATABASE_URL` | unset | Async PostgreSQL URL; required for platform v2 |
 | `MEDIA_ENGINE_S3_ENDPOINT_URL` | AWS default | Optional S3-compatible endpoint such as MinIO |
 | `MEDIA_ENGINE_S3_PUBLIC_ENDPOINT_URL` | internal endpoint | Client-reachable endpoint used when signing artifact URLs |
@@ -323,6 +325,11 @@ docker compose --env-file .env.worker -f compose.worker.yaml logs -f worker
 6. Return to **Workers** and confirm the node is online and reporting its hostname, version, backend, and processors.
 7. Submit a compatible job and confirm its active lease appears on that worker.
 
+Workers publish their detected decoder capabilities. If a strict hardware worker discovers an unsupported source codec
+after probing the downloaded input, it returns the lease without spending an attempt. The control plane adds the codec
+as a stage requirement and routes the next claim to a compatible worker. A job stays queued with a clear
+`unsupported_input_codec` message when no attached worker can decode it; the job detail shows the missing decoder.
+
 Use `compose.worker-rk1.yaml` for an RK1 or `compose.worker-jetson-xavier-nx.yaml` for a Jetson Xavier NX. Every
 definition contains exactly one worker service plus a scratch volume. Media moves directly between the node and S3
 using short-lived signed URLs; the API does not proxy large stage files.
@@ -371,7 +378,7 @@ docker compose -f docker-compose.cpu.yml up -d
 ## Building + pushing images
 Use the helper in `scripts/dockerbuild.sh` to publish the generic, RK1, and Jetson Xavier NX variants.
 ```bash
-./scripts/dockerbuild.sh v0.4.0
+./scripts/dockerbuild.sh v0.4.1
 ```
 Environment knobs:
 - `IMAGE_REPO` – Docker repository name.

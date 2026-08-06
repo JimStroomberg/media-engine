@@ -237,8 +237,22 @@ async function loadJobs() {
 function workerCapabilities(capabilities) {
   return Object.entries(capabilities || {}).flatMap(([group, values]) => {
     if (!Array.isArray(values)) return [];
+    if (group === "decoders" && values.length > 12) {
+      const common = ["h264", "h265", "av1", "vp9", "vp8", "jpeg", "mpeg2", "mpeg4", "gif", "prores"];
+      const visible = common.filter((codec) => values.includes(codec));
+      return [
+        ...visible.map((codec) => `<span class="chip" title="decoders">${escapeHtml(codec)}</span>`),
+        `<span class="chip" title="decoders">${values.length} total</span>`,
+      ];
+    }
     return values.map((value) => `<span class="chip" title="${escapeHtml(group)}">${escapeHtml(value)}</span>`);
   }).join("");
+}
+
+function stageCapabilities(capabilities) {
+  const values = Object.entries(capabilities || {}).flatMap(([group, items]) =>
+    (items || []).map((item) => `${group}: ${item}`));
+  return values.length ? values.join(" · ") : "No special capability requirement";
 }
 
 function workerDisplayStatus(worker) {
@@ -560,7 +574,7 @@ async function showJobDetail(jobId) {
     $("#detail-title").textContent = job.source_filename;
     $("#detail-content").innerHTML = `
       <section class="detail-section"><div class="detail-summary"><div><span>Status</span><strong>${statusBadge(job.status)}</strong></div><div><span>Pipeline</span><strong>${escapeHtml(job.pipeline)} v${escapeHtml(job.pipeline_version)}</strong></div><div><span>Client</span><strong>${escapeHtml(job.client_name)}</strong></div><div><span>AI cost</span><strong>${formatUsd(detail.estimated_cost_usd, 6)}</strong></div><div><span>Duration</span><strong>${formatDuration(job.duration_seconds)}</strong></div><div><span>Cache</span><strong>${job.cache_hit ? "Hit" : job.run_reused ? "Shared run" : "New run"}</strong></div><div><span>Source</span><strong>${formatBytes(detail.source_size_bytes)} · ${escapeHtml(detail.source_media_type || "unknown")}</strong></div><div><span>Expires</span><strong>${formatDate(detail.run_expires_at)}</strong></div></div></section>
-      <section class="detail-section"><h3>Stages</h3><div class="table-wrap"><table><thead><tr><th>Stage</th><th>Status</th><th>Attempt</th><th>Worker</th><th>Timing</th><th>Error</th></tr></thead><tbody>${detail.stages.map((stage) => `<tr><td><span class="row-title">${escapeHtml(stage.name)}</span></td><td>${statusBadge(stage.status)}</td><td>${stage.attempt}/${stage.max_attempts}</td><td>${escapeHtml(stage.worker_name || "—")}</td><td>${stage.started_at ? formatDuration((new Date(stage.completed_at || Date.now()) - new Date(stage.started_at)) / 1000) : "—"}</td><td><span class="row-title">${escapeHtml(stage.error_message || "—")}</span></td></tr>`).join("")}</tbody></table></div></section>
+      <section class="detail-section"><h3>Stages</h3><div class="table-wrap"><table><thead><tr><th>Stage</th><th>Status</th><th>Attempt</th><th>Worker</th><th>Timing</th><th>Error</th></tr></thead><tbody>${detail.stages.map((stage) => `<tr><td><span class="row-title">${escapeHtml(stage.name)}</span><span class="row-subtitle">${escapeHtml(stageCapabilities(stage.required_capabilities))}</span></td><td>${statusBadge(stage.status)}</td><td>${stage.attempt}/${stage.max_attempts}</td><td>${escapeHtml(stage.worker_name || "—")}</td><td>${stage.started_at ? formatDuration((new Date(stage.completed_at || Date.now()) - new Date(stage.started_at)) / 1000) : "—"}</td><td><span class="row-title">${escapeHtml(stage.error_message || "—")}</span></td></tr>`).join("")}</tbody></table></div></section>
       <section class="detail-section"><h3>Artifacts · ${detail.artifacts.length}</h3><div class="table-wrap">${detail.artifacts.length ? `<table><thead><tr><th>Type</th><th>Format</th><th>Size</th><th>Storage</th><th>Expires</th></tr></thead><tbody>${detail.artifacts.map((artifact) => `<tr><td><span class="row-title">${escapeHtml(artifact.artifact_type)}</span><span class="row-subtitle mono">${truncateId(artifact.sha256)}</span></td><td>${escapeHtml(artifact.format)}</td><td>${formatBytes(artifact.size_bytes)}</td><td>${statusBadge(artifact.storage_state)}</td><td>${formatDate(artifact.expires_at)}</td></tr>`).join("")}</tbody></table>` : emptyState("No artifacts yet", "Outputs will appear as stages complete.")}</div></section>
       <section class="detail-section"><h3>Provider usage · ${detail.usage.length}</h3><div class="table-wrap">${detail.usage.length ? `<table><thead><tr><th>Operation</th><th>Provider</th><th>Model</th><th>Outcome</th><th>Cost</th></tr></thead><tbody>${detail.usage.map((event) => `<tr><td>${escapeHtml(event.operation)}</td><td>${escapeHtml(event.provider)}</td><td><span class="row-title">${escapeHtml(event.model)}</span></td><td>${statusBadge(event.outcome)}</td><td>${event.estimated_cost_usd == null ? "—" : formatUsd(event.estimated_cost_usd, 6)}</td></tr>`).join("")}</tbody></table>` : emptyState("No provider usage", "This job has no model-backed stages yet.")}</div></section>
       <section class="detail-section"><h3>Run configuration</h3><pre class="json-block">${escapeHtml(JSON.stringify({ run_key: detail.run_key, options: detail.options, processor_versions: detail.processor_versions, source_metadata: detail.source_metadata }, null, 2))}</pre></section>`;
