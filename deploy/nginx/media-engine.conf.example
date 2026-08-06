@@ -110,17 +110,9 @@ server {
         add_header X-Frame-Options "DENY" always;
     }
 
-    # The public hostname must never expose the worker control protocol.
-    # Local all-in-one workers use Docker networking. Remote workers should use
-    # a VPN/private route or the restricted example in media-engine-worker.conf.example.
-    location = /v2/internal {
-        return 404;
-    }
-
-    location ^~ /v2/internal/ {
-        return 404;
-    }
-
+    # Standalone workers use /v2/internal/* on this same HTTPS origin. Every
+    # request is protected by an individually issued, revocable worker token.
+    # Media payloads bypass this route and transfer through signed S3 URLs.
     location / {
         proxy_pass http://media_engine_api;
 

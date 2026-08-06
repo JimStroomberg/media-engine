@@ -4,6 +4,29 @@ All notable Media Engine changes are documented here.
 
 ## Unreleased
 
+## 0.4.0 - 2026-08-06
+
+### Added
+
+- Minimal one-container CPU, RK1, and Jetson Xavier NX deployments that need only a worker-facing API URL and their
+  own token.
+- Configurable standalone-worker hostnames so the dashboard reports recognizable physical node names instead of
+  generated container IDs.
+- A JetPack 5-compatible Xavier NX 16GB worker image and Compose profile using NVIDIA NVDEC, NVENC, VIC, CUDA,
+  TensorRT, and detected DLA/PVA hardware. Its boot probe performs an actual hardware encode/decode round trip.
+
+### Changed
+
+- The recommended reverse-proxy deployment now serves the authenticated worker protocol on the normal API hostname,
+  avoiding a separate worker DNS record while retaining an optional IP-restricted topology for advanced installations.
+- Worker flavour is now a generic packaging profile plus advertised capabilities. The control plane schedules by
+  capability rather than hardware-specific branches, allowing RKMPP, Jetson V4L2, and future NVENC or VA-API images
+  to share the same worker protocol.
+- RK1 Compose deployments now use the Rockchip multimedia libraries already bundled in the RK1 image instead of
+  masking them with host-library bind mounts, allowing clean Ubuntu RK1 nodes to attach without package installation.
+
+## 0.3.0 - 2026-08-06
+
 ### Added
 
 - Individually revocable worker identities with one-time tokens, server-bound identity, expiry metadata, and dashboard
@@ -16,8 +39,8 @@ All notable Media Engine changes are documented here.
 
 - Disabled unavailable local build-record uploads and Docker-specific job summaries for Docker Build Cloud while
   retaining SBOM and provenance attestations.
-- Worker flavour is now a generic packaging profile plus advertised capabilities. The control plane schedules by
-  capability rather than hardware-specific branches, leaving room for Jetson, NVENC, VA-API, and other images.
+- Worker flavour became a generic packaging profile plus advertised capabilities, leaving room for additional
+  hardware-specific images behind the same worker protocol.
 - Existing shared-token worker rows are disabled by migration and must be re-enrolled with an individual credential.
 
 ### Fixed

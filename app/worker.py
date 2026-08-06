@@ -3,11 +3,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import platform
 import re
 import shutil
 import signal
-import socket
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -19,6 +17,7 @@ import httpx
 from . import __version__
 from .config import Settings, ensure_runtime_directories, get_settings
 from .domain.content import sha256_file
+from .hardware import detected_worker_capabilities, detected_worker_runtime
 from .models import CodecPreference, JobRequest, JobStatus, QualityTarget
 from .processors import LocalMediaProcessor, OpenAIMediaProcessor, ProducedArtifact, StageInputFile, XAIMediaProcessor
 from .processors.usage import ProviderUsageEvent, capture_provider_usage, mark_usage_outcome
@@ -103,26 +102,9 @@ class MediaWorker:
             pass
 
     async def _register_until_ready(self, client: httpx.AsyncClient) -> None:
-        processors = []
-        if shutil.which(self.settings.ffmpeg_command) and shutil.which(self.settings.ffprobe_command):
-            processors.append("ffmpeg")
-        if shutil.which(self.settings.tesseract_command):
-            processors.append("tesseract")
         payload = {
-            "capabilities": {
-                "pipelines": ["transcode"],
-                "backends": [self.settings.worker_backend],
-                "encoders": ["h264", "h265"],
-                "processors": processors,
-                "providers": ["openai", "xai"],
-            },
-            "runtime": {
-                "version": __version__,
-                "hostname": socket.gethostname(),
-                "architecture": platform.machine(),
-                "platform": platform.system().lower(),
-                "profile": self.settings.worker_profile,
-            },
+            "capabilities": detected_worker_capabilities(self.settings),
+            "runtime": detected_worker_runtime(self.settings, version=__version__),
         }
         while not self._shutdown.is_set():
             try:
@@ -359,9 +341,7 @@ class MediaWorker:
                     async for chunk in response.aiter_bytes(1024 * 1024):
                         await output.write(chunk)
         except httpx.HTTPStatusError as exc:
-            raise RuntimeError(
-                f"Signed stage download failed with HTTP {exc.response.status_code}"
-            ) from None
+            raise RuntimeError(f"Signed stage download failed with HTTP {exc.response.status_code}") from None
         except httpx.HTTPError:
             raise RuntimeError("Signed stage download request failed") from None
         actual_sha256, actual_size = await asyncio.to_thread(sha256_file, destination)
@@ -384,9 +364,7 @@ class MediaWorker:
             response = await transfer_client.put(upload_url, headers=headers, content=chunks())
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            raise RuntimeError(
-                f"Signed artifact upload failed with HTTP {exc.response.status_code}"
-            ) from None
+            raise RuntimeError(f"Signed artifact upload failed with HTTP {exc.response.status_code}") from None
         except httpx.HTTPError:
             raise RuntimeError("Signed artifact upload request failed") from None
 

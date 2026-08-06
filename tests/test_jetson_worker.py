@@ -1,0 +1,153 @@
+from __future__ import annotations
+
+from pathlib import Path
+from types import SimpleNamespace
+
+from app import hardware
+from app.config import Settings
+from app.models import CodecPreference, JobStatus, QualityTarget
+from app.transcode import engine as engine_module
+from app.transcode.engine import TranscodeEngine
+from app.transcode.probe import MediaInfo, MediaStreamInfo
+from app.transcode.profiles import PROFILES
+
+
+def jetson_settings() -> Settings:
+    return Settings(
+        _env_file=None,
+        worker_backend="nvv4l2",
+        worker_profile="jetson-xavier-nx",
+    )
+
+
+def test_jetson_capabilities_report_only_detected_accelerators(monkeypatch) -> None:
+    features = {
+        "nvv4l2decoder",
+        "nvv4l2h264enc",
+        "nvv4l2h265enc",
+        "nvvidconv",
+    }
+    devices = {
+        "/dev/nvhost-nvdec",
+        "/dev/nvhost-msenc",
+        "/dev/nvhost-vic",
+        "/dev/nvhost-gpu",
+        "/dev/nvhost-nvdla0",
+        "/dev/nvhost-nvdla1",
+        "/dev/nvhost-pva0",
+        "/dev/nvhost-pva1",
+    }
+
+    monkeypatch.setattr(hardware, "gstreamer_feature_available", lambda _settings, name: name in features)
+    monkeypatch.setattr(hardware.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(hardware.ctypes.util, "find_library", lambda name: f"lib{name}.so")
+    monkeypatch.setattr(Path, "exists", lambda path: str(path) in devices)
+
+    capabilities = hardware.detected_worker_capabilities(jetson_settings())
+
+    assert capabilities["backends"] == ["nvv4l2"]
+    assert capabilities["encoders"] == ["h264", "h265"]
+    assert capabilities["decoders"] == list(hardware.JETSON_DECODERS)
+    assert capabilities["accelerators"] == ["nvdec", "nvenc", "vic", "cuda", "tensorrt", "dla"]
+    assert capabilities["video_transforms"] == ["scale", "colorspace", "composite"]
+    assert capabilities["hardware"] == ["jetson-xavier-nx", "volta-gpu", "dual-nvdla", "dual-pva"]
+    assert "gstreamer" in capabilities["processors"]
+
+
+def test_jetson_capabilities_do_not_claim_missing_devices(monkeypatch) -> None:
+    monkeypatch.setattr(hardware, "gstreamer_feature_available", lambda _settings, _name: True)
+    monkeypatch.setattr(hardware.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(hardware.ctypes.util, "find_library", lambda _name: None)
+    monkeypatch.setattr(Path, "exists", lambda _path: False)
+
+    capabilities = hardware.detected_worker_capabilities(jetson_settings())
+
+    assert capabilities["encoders"] == ["h264", "h265"]
+    assert capabilities["accelerators"] == []
+    assert "decoders" not in capabilities
+    assert capabilities["hardware"] == ["jetson-xavier-nx", "volta-gpu", "dual-nvdla"]
+
+
+def test_jetson_runtime_reports_l4t_cuda_and_tensorrt(monkeypatch) -> None:
+    def fake_read(path: Path) -> str | None:
+        if str(path) == "/proc/device-tree/model":
+            return "NVIDIA Jetson Xavier NX Developer Kit\x00"
+        if str(path) == "/etc/nv_tegra_release":
+            return "# R35 (release), REVISION: 6.5, GCID: 123"
+        return None
+
+    monkeypatch.setattr(hardware, "_read_text", fake_read)
+    monkeypatch.setenv("CUDA_VERSION", "11.4.19")
+    monkeypatch.setenv("NVIDIA_TENSORRT_VERSION", "8.5.2")
+
+    runtime = hardware.detected_worker_runtime(jetson_settings(), version="0.4.0")
+
+    assert runtime["hardware_model"] == "NVIDIA Jetson Xavier NX Developer Kit"
+    assert runtime["l4t_release"] == "R35.6.5"
+    assert runtime["cuda_version"] == "11.4.19"
+    assert runtime["tensorrt_version"] == "8.5.2"
+
+
+def test_jetson_codec_selection_normalizes_mjpeg(monkeypatch) -> None:
+    monkeypatch.setattr(engine_module, "gstreamer_feature_available", lambda _settings, _name: True)
+    transcode_engine = TranscodeEngine.__new__(TranscodeEngine)
+    transcode_engine.settings = jetson_settings()
+    media = MediaInfo(
+        container="avi",
+        bit_rate=None,
+        duration=1.0,
+        video=MediaStreamInfo(codec_type="video", codec_name="mjpeg", width=640, height=480),
+        audio=None,
+    )
+
+    use_hardware, decoder, encoder = transcode_engine._select_jetson_codecs(media, CodecPreference.h265)
+
+    assert use_hardware is True
+    assert decoder == "nvv4l2decoder"
+    assert encoder == "nvv4l2h265enc"
+
+
+def test_jetson_pipeline_converts_compositor_rgba_output_for_nvenc(monkeypatch, tmp_path) -> None:
+    transcode_engine = TranscodeEngine.__new__(TranscodeEngine)
+    transcode_engine.settings = jetson_settings()
+    source = tmp_path / "source.mp4"
+    destination = tmp_path / "output.mp4"
+    source.write_bytes(b"source")
+    record = SimpleNamespace(
+        source_width=1280,
+        source_height=720,
+        media_duration_seconds=3.0,
+        transcode_media_seconds=None,
+        updated_at=None,
+        cancel_requested=False,
+        status=JobStatus.processing,
+    )
+    captured: dict[str, list[str]] = {}
+
+    def fake_gstreamer(command, **_kwargs) -> None:
+        captured["gstreamer"] = command
+        video_path = Path(next(part.split("=", 1)[1] for part in command if part.startswith("location=")))
+        video_path.write_bytes(b"video")
+
+    def fake_ffmpeg(command, **_kwargs) -> None:
+        captured["ffmpeg"] = command
+        Path(command[-1]).write_bytes(b"muxed")
+
+    monkeypatch.setattr(transcode_engine, "_run_gstreamer", fake_gstreamer)
+    monkeypatch.setattr(transcode_engine, "_run_ffmpeg", fake_ffmpeg)
+
+    transcode_engine._transcode_jetson(
+        record,
+        source,
+        destination,
+        PROFILES[QualityTarget.sd_480p],
+        CodecPreference.h265,
+    )
+
+    command = captured["gstreamer"]
+    rgba_index = command.index("video/x-raw(memory:NVMM),format=RGBA,width=848,height=480")
+    nv12_index = command.index("video/x-raw(memory:NVMM),format=NV12,width=848,height=480")
+    assert command[rgba_index + 2] == "nvvidconv"
+    assert rgba_index < nv12_index < command.index("nvv4l2h265enc")
+    assert "hvc1" in captured["ffmpeg"]
+    assert destination.read_bytes() == b"muxed"

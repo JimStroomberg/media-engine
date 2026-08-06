@@ -1,7 +1,7 @@
 services:
   api:
     environment:
-      MEDIA_ENGINE_TRANSCODE_REQUIRED_BACKEND: rkmpp
+      MEDIA_ENGINE_TRANSCODE_REQUIRED_BACKEND: ${MEDIA_ENGINE_TRANSCODE_REQUIRED_BACKEND-rkmpp}
       MEDIA_ENGINE_INITIAL_WORKER_TOKEN: ${MEDIA_ENGINE_LOCAL_WORKER_TOKEN:?Set MEDIA_ENGINE_LOCAL_WORKER_TOKEN}
       MEDIA_ENGINE_INITIAL_WORKER_KEY: ${MEDIA_ENGINE_RK1_WORKER_KEY:-worker-rk1-1}
       MEDIA_ENGINE_INITIAL_WORKER_DISPLAY_NAME: ${MEDIA_ENGINE_RK1_WORKER_DISPLAY_NAME:-Rockchip RK1 worker}
@@ -41,9 +41,6 @@ services:
       MEDIA_ENGINE_TEMP_DIR: /worker/temp
     volumes:
       - worker-rk1-scratch:/worker
-      - /usr/lib/aarch64-linux-gnu/dri:/usr/lib/aarch64-linux-gnu/dri:ro
-      - /usr/lib/aarch64-linux-gnu/rga:/usr/lib/aarch64-linux-gnu/rga:ro
-      - /usr/lib/aarch64-linux-gnu/mpp:/usr/lib/aarch64-linux-gnu/mpp:ro
     devices:
       - /dev/dri:/dev/dri
       - /dev/mpp_service:/dev/mpp_service

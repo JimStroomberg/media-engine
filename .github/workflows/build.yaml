@@ -12,8 +12,10 @@ env:
   IMAGE_REPO: jimstro/media-engine
   BASE_PLATFORMS: linux/amd64,linux/arm64
   RK_PLATFORMS: linux/arm64
+  JETSON_PLATFORMS: linux/arm64
   CACHE_REF_BASE: jimstro/media-engine:buildcache-base
   CACHE_REF_RK:   jimstro/media-engine:buildcache-rk1
+  CACHE_REF_JETSON: jimstro/media-engine:buildcache-jetson-xavier-nx
   # Docker Build Cloud retains remote records itself; the action cannot export
   # those records as local GitHub artifacts after the remote builder exits.
   DOCKER_BUILD_RECORD_UPLOAD: "false"
@@ -70,6 +72,7 @@ jobs:
           export MEDIA_ENGINE_WORKER_TOKEN=mew_abcdef012345_compose-validation-remote-worker-secret
           docker compose -f compose.worker.yaml config --quiet
           docker compose -f compose.worker-rk1.yaml config --quiet
+          docker compose -f compose.worker-jetson-xavier-nx.yaml config --quiet
 
   build:
     needs: test
@@ -181,6 +184,36 @@ jobs:
           fi
           echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
 
+      # --- Compute tags for the Jetson Xavier NX variant ---
+      - name: Compute tagging (Jetson Xavier NX)
+        id: tags_jetson
+        shell: bash
+        run: |
+          EVENT_NAME="${GITHUB_EVENT_NAME}"
+          REF_TYPE="${GITHUB_REF_TYPE}"
+
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            SRC_NAME="${GITHUB_HEAD_REF}"
+          else
+            SRC_NAME="${GITHUB_REF_NAME}"
+          fi
+
+          SAFE_NAME=$(echo "$SRC_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_.-]/-/g')
+
+          if [ "$REF_TYPE" = "tag" ]; then
+            VER="${SRC_NAME#v}"
+            TAGS="${{ env.IMAGE_REPO }}:jetson-xavier-nx-${VER},${{ env.IMAGE_REPO }}:jetson-xavier-nx-latest"
+          elif [ "$EVENT_NAME" = "pull_request" ]; then
+            TAGS="${{ env.IMAGE_REPO }}:jetson-xavier-nx-pr-${SAFE_NAME}-${GITHUB_SHA::7}"
+          elif [ "$REF_TYPE" = "branch" ] && [ "$SRC_NAME" = "main" ]; then
+            TAGS="${{ env.IMAGE_REPO }}:jetson-xavier-nx-main-${GITHUB_SHA::7},${{ env.IMAGE_REPO }}:jetson-xavier-nx-latest"
+          elif [ "$REF_TYPE" = "branch" ] && [ "$SRC_NAME" = "dev" ]; then
+            TAGS="${{ env.IMAGE_REPO }}:jetson-xavier-nx-dev-${GITHUB_SHA::7},${{ env.IMAGE_REPO }}:jetson-xavier-nx-dev-latest"
+          else
+            TAGS="${{ env.IMAGE_REPO }}:jetson-xavier-nx-${SAFE_NAME}-${GITHUB_SHA::7}"
+          fi
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
+
       # --- BASE build (RK_VARIANT=false) ---
       - name: Build BASE (${{ env.BASE_PLATFORMS }})
         if: ${{ steps.ctx.outputs.can_publish == 'true' }}
@@ -256,3 +289,40 @@ jobs:
             RK_VARIANT=true
           outputs: type=cacheonly
           tags: ${{ steps.tags_rk.outputs.tags }}
+
+      # --- Jetson Xavier NX build (JetPack 5 / L4T R35) ---
+      - name: Build Jetson Xavier NX (${{ env.JETSON_PLATFORMS }})
+        if: ${{ steps.ctx.outputs.can_publish == 'true' }}
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ./Dockerfile.jetson
+          platforms: ${{ env.JETSON_PLATFORMS }}
+          push: ${{ github.event_name != 'pull_request' }}
+          sbom: true
+          provenance: true
+          build-args: |
+            PYTHON_IMAGE=python:3.13-slim-bullseye
+            JETSON_BASE_IMAGE=nvcr.io/nvidia/l4t-tensorrt:r8.5.2-runtime
+          cache-from: |
+            type=registry,ref=${{ env.CACHE_REF_JETSON }}
+          cache-to: |
+            type=registry,ref=${{ env.CACHE_REF_JETSON }},mode=max
+          outputs: ${{ github.event_name == 'pull_request' && 'type=cacheonly' || 'type=registry' }}
+          tags: ${{ steps.tags_jetson.outputs.tags }}
+
+      - name: Build Jetson Xavier NX (pull request, cache-only)
+        if: ${{ steps.ctx.outputs.can_publish != 'true' }}
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ./Dockerfile.jetson
+          platforms: ${{ env.JETSON_PLATFORMS }}
+          push: false
+          sbom: false
+          provenance: false
+          build-args: |
+            PYTHON_IMAGE=python:3.13-slim-bullseye
+            JETSON_BASE_IMAGE=nvcr.io/nvidia/l4t-tensorrt:r8.5.2-runtime
+          outputs: type=cacheonly
+          tags: ${{ steps.tags_jetson.outputs.tags }}

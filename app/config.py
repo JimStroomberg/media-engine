@@ -42,6 +42,8 @@ class Settings(BaseSettings):
 
     ffmpeg_command: str = Field("ffmpeg", description="Executable used for media transcoding")
     ffprobe_command: str = Field("ffprobe", description="Executable used for media probing")
+    gstreamer_command: str = Field("gst-launch-1.0", description="Executable used for Jetson media pipelines")
+    gst_inspect_command: str = Field("gst-inspect-1.0", description="Executable used to inspect GStreamer features")
     ffprobe_timeout_seconds: int = Field(30, description="Maximum time to wait for ffprobe")
     media_command_timeout_seconds: int = Field(
         1800,
@@ -53,6 +55,10 @@ class Settings(BaseSettings):
     require_rk_accel: bool = Field(
         False,
         description="Fail startup when RKMPP hardware acceleration is expected but missing",
+    )
+    require_jetson_accel: bool = Field(
+        False,
+        description="Fail startup when NVIDIA Jetson V4L2 acceleration is expected but missing",
     )
 
     database_url: str | None = Field(None, description="Async SQLAlchemy URL for the platform PostgreSQL database")

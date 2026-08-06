@@ -42,7 +42,10 @@ encrypted, so it cannot reveal those plaintext values later.
 
 Create workers before starting their containers. The dashboard returns a copy-ready `.env.worker` block containing the
 worker-facing API URL, individual token, and image appropriate for the selected profile. Set
-`MEDIA_ENGINE_WORKER_ADVERTISED_API_URL` on the control plane when workers use a different hostname than the dashboard.
+`MEDIA_ENGINE_WORKER_ADVERTISED_API_URL` to the externally reachable HTTPS API origin. It can use the same hostname as
+the dashboard; a separate worker-only hostname is an optional advanced deployment. Built-in deployment profiles are
+`cpu`, `rk1`, and `jetson-xavier-nx`; the last generates the Xavier-specific image tag used by
+`compose.worker-jetson-xavier-nx.yaml`.
 
 Draining prevents new claims without interrupting an active lease. Resume returns the worker to scheduling. Rotation
 invalidates the old token immediately and returns a replacement once; revocation disables the identity completely. A

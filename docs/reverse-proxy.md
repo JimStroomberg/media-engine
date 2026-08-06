@@ -30,7 +30,7 @@ Once both public hostnames are reachable, configure the control plane:
 ```dotenv
 MEDIA_ENGINE_S3_PUBLIC_ENDPOINT_URL=https://s3.media.example.com
 MEDIA_ENGINE_S3_WORKER_ENDPOINT_URL=https://s3.media.example.com
-MEDIA_ENGINE_WORKER_ADVERTISED_API_URL=https://workers.media.example.com
+MEDIA_ENGINE_WORKER_ADVERTISED_API_URL=https://media.example.com
 MEDIA_ENGINE_ADMIN_SESSION_COOKIE_SECURE=true
 ```
 
@@ -39,12 +39,20 @@ MEDIA_ENGINE_ADMIN_SESSION_COOKIE_SECURE=true
 `MEDIA_ENGINE_S3_WORKER_ENDPOINT_URL` constructs signed stage download and upload URLs. They may point at the same S3
 hostname when it is reachable by both clients and workers.
 
-The public API example returns `404` for `/v2/internal/*`. An all-in-one worker continues to use the private Docker
-network. Standalone workers must use a private VPN/LAN route or the restricted worker hostname. Never expose the worker
-protocol broadly: a claimed AI stage can contain a temporary provider credential.
+The API hostname also proxies `/v2/internal/*` so a generated standalone-worker deployment works without another DNS
+record. These endpoints require individually issued, high-entropy worker bearer tokens; Media Engine stores only their
+hashes and administrators can drain, rotate, revoke, or remove each identity independently. TLS is mandatory when the
+route crosses an untrusted network because a claimed provider-backed stage can carry a temporary provider credential.
 
-The worker hostname remains a normal TLS reverse proxy without an HTTP/3 advertisement. The bundled worker client does
-not currently speak QUIC, so opening another public UDP surface would provide no transport benefit there.
+An all-in-one worker continues to use the private Docker API address. Both local and remote workers use signed S3 URLs
+based on `MEDIA_ENGINE_S3_WORKER_ENDPOINT_URL`, so configure a hostname reachable from every worker rather than the
+Docker-only `minio:9000` address. Split DNS is optional when IPv4 hairpin NAT works from Docker networks or containers
+have routed IPv6. Test both HTTPS hostnames from inside the worker container; if either connection fails, add local DNS
+records pointing the unchanged public hostnames at the reverse proxy's LAN address.
+
+Operators who explicitly want network isolation can instead adapt
+[`deploy/nginx/media-engine-worker.conf.example`](../deploy/nginx/media-engine-worker.conf.example) as an advanced,
+IP-restricted worker-only hostname.
 
 ## Static root page
 

@@ -23,15 +23,16 @@ Production HTTPS, HTTP/3/QUIC, and large-upload considerations are documented in
 | --- | --- | --- |
 | `jimstro/media-engine:latest` | linux/amd64, linux/arm64 | Generic CPU build (software decode + x264/x265) |
 | `jimstro/media-engine:rk1-latest` | linux/arm64 | Rockchip RK1 build with ffmpeg from `ppa:jjriek/rockchip-multimedia` |
+| `jimstro/media-engine:jetson-xavier-nx-latest` | linux/arm64 | JetPack 5 Xavier NX build with Python 3.13, NVIDIA GStreamer, CUDA 11.4, and TensorRT 8.5 |
 
-The control plane and generic worker build on Ubuntu 26.04 LTS. The default Compose stack pins PostgreSQL 18.4 and MinIO `RELEASE.2025-09-07T16-13-09Z`, the current stable community image. The RK1 worker is deliberately built on Ubuntu 24.04 LTS because the required Rockchip multimedia PPA does not publish packages for 26.04; it is an isolated hardware compatibility exception rather than the platform baseline.
+The control plane and generic worker build on Ubuntu 26.04 LTS. The default Compose stack pins PostgreSQL 18.4 and MinIO `RELEASE.2025-09-07T16-13-09Z`, the current stable community image. Hardware images deliberately follow their vendor runtime: RK1 uses Ubuntu 24.04 for its multimedia packages, while Xavier NX uses NVIDIA's JetPack 5/L4T R35 TensorRT base. These are isolated worker compatibility requirements rather than the platform baseline.
 
 ## Highlights
 - **S3-only durable media** – platform media is stored by content hash in S3-compatible object storage, including single-node deployments through MinIO.
 - **Duplicate detection** – repeated exact bytes reuse one retained blob, while deterministic run keys single-flight and cache equivalent processing requests.
 - **Automatic expiry** – PostgreSQL records retention state and an idempotent scheduler removes expired S3 objects.
 - **Compose-first control plane** – API, PostgreSQL, MinIO, migrations, scheduler, and webhook dispatcher can run together now and separate cleanly later.
-- **Standalone worker nodes** – one-service CPU and RK1 Compose deployments use individually revocable worker tokens and short-lived S3 transfer URLs without receiving database, administrator, or object-store credentials.
+- **Standalone worker nodes** – one-service CPU, RK1, and Jetson Xavier NX Compose deployments use individually revocable worker tokens and short-lived S3 transfer URLs without receiving database, administrator, or object-store credentials.
 - **Tenant API keys** – client projects receive scoped, revocable API keys; assets and job requests are isolated by client while retained processing results remain reusable.
 - **Managed AI providers** – OpenAI and xAI connections are encrypted in PostgreSQL, configurable through administrator endpoints, and delivered to workers only for a claimed AI stage.
 - **Durable AI accounting** – every provider response records model, tokens or duration, cost, latency, stage attempt, and outcome, including responses whose later validation fails.
@@ -39,13 +40,16 @@ The control plane and generic worker build on Ubuntu 26.04 LTS. The default Comp
 - **Optional durable webhooks** – client-owned endpoints receive signed terminal job events through a PostgreSQL outbox with retries and delivery history; polling remains authoritative.
 - **Built-in management dashboard** – operators can inspect jobs, stages, artifacts, workers, provider usage, and webhook delivery, then manage providers, clients, API keys, and webhook endpoints without direct database access.
 - **Agent-ready outputs** – `ai_prepare` produces metadata, audio, subtitles, scenes, keyframes, and OCR; `understand` adds diarized transcription, visual descriptions, and a structured agent document.
-- **FFmpeg-first pipeline** – uses `ffmpeg` for probing, remuxing, and H.264/H.265 encoding by default; hardware integrations can be added behind the same interface.
+- **Hardware-aware pipeline** – uses FFmpeg on CPU/RKMPP and NVIDIA GStreamer on Jetson for NVDEC, VIC transforms,
+  and NVENC H.264/H.265 while retaining the same output and worker contracts.
 - **Smart defaults** – omit quality/codec to let the service choose the closest preset (2160p/1080p/720p/480p) based on the source; if you request a higher preset than the input can support, it automatically downgrades to the best fit.
 - **Audio-only path** – send `quality=audio_only` to extract AAC audio without video; this always runs on the CPU and returns an `.m4a`.
 - **Single active job** – an asyncio worker guarantees only one transcode at a time; additional requests queue automatically.
 - **Status + webhooks** – poll v2 job status at any time and optionally select a registered signed endpoint for terminal notifications.
-- **Boot self-test** – confirms `ffmpeg`/`ffprobe` are available and performs a tiny encode before the API starts serving traffic.
-- **Hardware-ready** – optional checks detect Rockchip RKMPP support and warn when the hardware ffmpeg build is missing.
+- **Boot self-test** – confirms the media toolchain and performs a tiny encode; hardware profiles additionally require
+  and exercise their actual accelerator before registering online.
+- **Hardware-ready** – workers advertise only the encoders, decoders, transforms, and accelerator devices detected at
+  runtime, so the dashboard reflects what each node can really execute.
 
 ## API surface
 | Endpoint | Method | Purpose |
@@ -127,8 +131,9 @@ Environment variables (prefixed with `MEDIA_ENGINE_`):
 | `MEDIA_ENGINE_JOB_RETENTION_MINUTES` | `120` | Minutes to keep completed job metadata and files |
 | `MEDIA_ENGINE_CALLBACK_TIMEOUT_SECONDS` | `10` | Timeout per temporary legacy `/jobs` callback attempt |
 | `MEDIA_ENGINE_CALLBACK_MAX_ATTEMPTS` | `3` | Temporary legacy `/jobs` callback retries |
-| `MEDIA_ENGINE_ALLOW_CPU_FALLBACK` | `true` | Permit CPU video fallback when hardware encoding fails (set `false` on RK1 to fail fast) |
+| `MEDIA_ENGINE_ALLOW_CPU_FALLBACK` | `true` | Permit CPU video fallback when hardware encoding fails (hardware Compose profiles set `false`) |
 | `MEDIA_ENGINE_REQUIRE_RK_ACCEL` | `false` | Fail startup when RKMPP hardware acceleration is expected but missing |
+| `MEDIA_ENGINE_REQUIRE_JETSON_ACCEL` | `false` | Fail startup unless the Jetson GStreamer plugins, devices, and encode/decode probe succeed |
 | `MEDIA_ENGINE_FFPROBE_TIMEOUT_SECONDS` | `30` | Maximum time allowed for media probing |
 | `MEDIA_ENGINE_DATABASE_URL` | unset | Async PostgreSQL URL; required for platform v2 |
 | `MEDIA_ENGINE_S3_ENDPOINT_URL` | AWS default | Optional S3-compatible endpoint such as MinIO |
@@ -156,8 +161,9 @@ Environment variables (prefixed with `MEDIA_ENGINE_`):
 | `MEDIA_ENGINE_WORKER_ADVERTISED_API_URL` | unset | Worker-facing URL included in deployment configuration generated by the dashboard |
 | `MEDIA_ENGINE_WORKER_TOKEN` | unset | Individually revocable worker token returned once by the dashboard or management API |
 | `MEDIA_ENGINE_WORKER_TOKEN_FILE` | unset | Optional mounted-secret file containing the worker token |
-| `MEDIA_ENGINE_WORKER_BACKEND` | `cpu` | Worker backend capability; standalone Compose files set this to `cpu` or `rkmpp` |
-| `MEDIA_ENGINE_WORKER_PROFILE` | `cpu` | Packaging profile reported by the worker, such as `cpu`, `rk1`, or `jetson` |
+| `MEDIA_ENGINE_WORKER_BACKEND` | `cpu` | Worker backend capability; current Compose files use `cpu`, `rkmpp`, or `nvv4l2` |
+| `MEDIA_ENGINE_WORKER_PROFILE` | `cpu` | Packaging profile reported by the worker, such as `cpu`, `rk1`, or `jetson-xavier-nx` |
+| `MEDIA_ENGINE_WORKER_HOSTNAME` | Compose-specific | Descriptive runtime hostname reported by a standalone worker, such as `rknode-2` |
 | `MEDIA_ENGINE_WORKER_LEASE_SECONDS` | `90` | Time a worker owns a stage without a heartbeat |
 | `MEDIA_ENGINE_WORKER_HEARTBEAT_SECONDS` | `20` | Worker heartbeat interval during processing |
 | `MEDIA_ENGINE_WORKER_POLL_SECONDS` | `2` | Worker delay between empty stage-claim attempts |
@@ -301,7 +307,7 @@ other worker.
 ### Add a worker in five minutes
 
 1. Open **Dashboard → Workers → Add worker**.
-2. Enter a display name and profile such as `cpu` or `rk1`.
+2. Enter a display name and profile such as `cpu`, `rk1`, or `jetson-xavier-nx`.
 3. Copy the generated `.env.worker` configuration. The token is shown only once.
 4. On the worker host, download this repository or copy `compose.worker.yaml` and save the generated values as
    `.env.worker` with mode `600`.
@@ -317,13 +323,14 @@ docker compose --env-file .env.worker -f compose.worker.yaml logs -f worker
 6. Return to **Workers** and confirm the node is online and reporting its hostname, version, backend, and processors.
 7. Submit a compatible job and confirm its active lease appears on that worker.
 
-Use `compose.worker-rk1.yaml` in the three commands above for an RK1. Both definitions contain exactly one worker service
-plus a scratch volume. Media moves directly between the node and S3 using short-lived signed URLs; the API does not proxy
-large stage files.
+Use `compose.worker-rk1.yaml` for an RK1 or `compose.worker-jetson-xavier-nx.yaml` for a Jetson Xavier NX. Every
+definition contains exactly one worker service plus a scratch volume. Media moves directly between the node and S3
+using short-lived signed URLs; the API does not proxy large stage files.
 
 The control plane must set `MEDIA_ENGINE_S3_WORKER_ENDPOINT_URL` to an S3/MinIO address reachable from the worker. It
-must also expose `/v2/internal/*` through a private LAN/VPN URL or a restricted HTTPS worker hostname. Set
-`MEDIA_ENGINE_WORKER_ADVERTISED_API_URL` when that URL differs from the dashboard hostname.
+must expose `/v2/internal/*` on its HTTPS API origin. Set `MEDIA_ENGINE_WORKER_ADVERTISED_API_URL` to that same origin so
+the dashboard can generate a ready-to-run worker environment. A separate private or IP-restricted worker hostname is an
+optional advanced deployment, not a requirement.
 
 Use `compose.control-plane.yaml` as an overlay when the central deployment should not start its bundled CPU worker:
 
@@ -333,8 +340,8 @@ docker compose --env-file .env.local \
   up -d --build
 ```
 
-See [docs/worker-deployment.md](docs/worker-deployment.md) for CPU and RK1 installation, Portainer, worker-only NGINX,
-token rotation, draining, upgrades, custom hardware flavours, and troubleshooting.
+See [docs/worker-deployment.md](docs/worker-deployment.md) for CPU, RK1, and Jetson installation, Portainer,
+worker-only NGINX, token rotation, draining, upgrades, custom hardware flavours, and troubleshooting.
 
 ## Smoke test script
 Run `scripts/test_transcode.sh` to submit a file against a running instance and watch it progress through the queue. Minimum example:
@@ -352,6 +359,7 @@ Adjust `--quality`, `--codec`, or `--poll-interval` to experiment with different
 - **All-in-one platform with RK1**: `compose.yaml` plus `compose.local-rk1.yaml`.
 - **Standalone CPU worker node**: `compose.worker.yaml` with `.env.worker`.
 - **Standalone RK1 worker node**: `compose.worker-rk1.yaml` with `.env.worker`.
+- **Standalone Jetson Xavier NX worker node**: `compose.worker-jetson-xavier-nx.yaml` with `.env.worker`.
 - **Generic CPU**: `docker-compose.cpu.yml` – simple volume/port mapping.
 - **Rockchip RK1**: `docker-compose.rockchip.yml` – includes device pass-through and enables RKMPP checks.
 
@@ -361,14 +369,15 @@ docker compose -f docker-compose.cpu.yml up -d
 ```
 
 ## Building + pushing images
-Use the helper in `scripts/dockerbuild.sh` to publish both the generic and RK1 variants.
+Use the helper in `scripts/dockerbuild.sh` to publish the generic, RK1, and Jetson Xavier NX variants.
 ```bash
-./scripts/dockerbuild.sh v0.3.0
+./scripts/dockerbuild.sh v0.4.0
 ```
 Environment knobs:
 - `IMAGE_REPO` – Docker repository name.
 - `BASE_PLATFORMS` – Comma-separated platforms for the generic image (default `linux/amd64,linux/arm64`).
 - `RK_PLATFORMS` – Platforms for the RK1 image (default `linux/arm64`).
+- `JETSON_PLATFORMS` – Platforms for the Xavier NX image (default `linux/arm64`).
 - `PUSH` – Set to `false` to load images locally instead of pushing.
 
 ## Roadmap notes

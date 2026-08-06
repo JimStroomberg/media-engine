@@ -249,7 +249,9 @@ function workerEnvironment(worker, token) {
   const releaseVersion = worker.release_version || "latest";
   const image = worker.profile === "rk1"
     ? `jimstro/media-engine:rk1-${releaseVersion}`
-    : `jimstro/media-engine:${releaseVersion}`;
+    : worker.profile === "jetson-xavier-nx"
+      ? `jimstro/media-engine:jetson-xavier-nx-${releaseVersion}`
+      : `jimstro/media-engine:${releaseVersion}`;
   return `# Save as .env.worker and keep it private
 MEDIA_ENGINE_WORKER_API_URL=${worker.worker_api_url || window.location.origin}
 MEDIA_ENGINE_WORKER_TOKEN=${token}
@@ -274,7 +276,7 @@ function workerForm(worker = null) {
     kicker: worker ? "Worker identity" : "New execution node",
     title: worker ? `Edit ${worker.display_name}` : "Add worker",
     submitLabel: worker ? "Save changes" : "Create worker",
-    html: `<label><span>Display name</span><input name="display_name" value="${escapeHtml(worker?.display_name || "")}" required maxlength="255" placeholder="Amsterdam CPU worker 01"></label><label><span>Worker profile</span><input name="profile" list="worker-profile-options" value="${escapeHtml(worker?.profile || "cpu")}" required maxlength="64" pattern="[a-z0-9][a-z0-9._-]{0,63}"><datalist id="worker-profile-options"><option value="cpu"><option value="rk1"><option value="jetson"><option value="intel-qsv"><option value="amd-vaapi"></datalist></label>${worker ? "" : '<label><span>Token expiry (optional)</span><input name="expires_at" type="datetime-local"></label>'}`,
+    html: `<label><span>Display name</span><input name="display_name" value="${escapeHtml(worker?.display_name || "")}" required maxlength="255" placeholder="Amsterdam CPU worker 01"></label><label><span>Worker profile</span><input name="profile" list="worker-profile-options" value="${escapeHtml(worker?.profile || "cpu")}" required maxlength="64" pattern="[a-z0-9][a-z0-9._-]{0,63}"><datalist id="worker-profile-options"><option value="cpu"><option value="rk1"><option value="jetson-xavier-nx"><option value="intel-qsv"><option value="amd-vaapi"></datalist></label>${worker ? "" : '<label><span>Token expiry (optional)</span><input name="expires_at" type="datetime-local"></label>'}`,
     onSubmit: async (data) => {
       const payload = { display_name: data.get("display_name"), profile: data.get("profile") };
       if (worker) {

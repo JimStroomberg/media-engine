@@ -21,7 +21,9 @@ x-platform-environment: &platform-environment
   MEDIA_ENGINE_PIPELINE_RETENTION_HOURS: ${MEDIA_ENGINE_PIPELINE_RETENTION_HOURS:-24}
   MEDIA_ENGINE_RETENTION_INTERVAL_SECONDS: ${MEDIA_ENGINE_RETENTION_INTERVAL_SECONDS:-60}
   MEDIA_ENGINE_WORKER_LEASE_SECONDS: ${MEDIA_ENGINE_WORKER_LEASE_SECONDS:-90}
-  MEDIA_ENGINE_TRANSCODE_REQUIRED_BACKEND: rkmpp
+  # Default to the bundled RK1. Set an explicitly empty Portainer environment
+  # value to allow any compatible backend, including remote Jetson workers.
+  MEDIA_ENGINE_TRANSCODE_REQUIRED_BACKEND: ${MEDIA_ENGINE_TRANSCODE_REQUIRED_BACKEND-rkmpp}
 
 services:
   postgres:
@@ -168,9 +170,6 @@ services:
       MEDIA_ENGINE_TEMP_DIR: /worker/temp
     volumes:
       - worker-rk1-scratch:/worker
-      - /usr/lib/aarch64-linux-gnu/dri:/usr/lib/aarch64-linux-gnu/dri:ro
-      - /usr/lib/aarch64-linux-gnu/rga:/usr/lib/aarch64-linux-gnu/rga:ro
-      - /usr/lib/aarch64-linux-gnu/mpp:/usr/lib/aarch64-linux-gnu/mpp:ro
     devices:
       - /dev/dri:/dev/dri
       - /dev/mpp_service:/dev/mpp_service

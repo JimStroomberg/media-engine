@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import select
 import shutil
 import subprocess
-from datetime import datetime
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Callable, Iterable, List, Optional, Tuple
 
 from ..config import get_settings
+from ..hardware import JETSON_DECODERS, gstreamer_feature_available
 from ..models import CodecPreference, JobRequest, JobStatus, QualityTarget
 from ..transcode.probe import MediaInfo, ProbeError, probe_media
 from ..transcode.profiles import QualityProfile, choose_profile
@@ -22,7 +24,7 @@ logger = logging.getLogger(__name__)
 class TranscodeResult:
     output_path: Path
     remuxed: bool
-    profile: Optional[QualityProfile]
+    profile: QualityProfile | None
     codec: CodecPreference
 
 
@@ -99,21 +101,29 @@ class TranscodeEngine:
             self._remux(record, source_path, work_output)
             remuxed = True
         else:
-            use_hw, decoder, encoder = self._select_rkmpp_codecs(info, target_codec)
+            hardware_backend, decoder, encoder = self._select_hardware_codecs(info, target_codec)
+            if self.settings.require_jetson_accel and self.settings.worker_backend == "nvv4l2" and not hardware_backend:
+                raise RuntimeError(f"Required Jetson hardware encoder is unavailable for codec {target_codec.value}")
             logger.info(
                 "Selected transcode path",
                 extra={
                     "job_id": job_id,
                     "profile": profile.name.value,
                     "codec": target_codec.value,
-                    "rkmpp_encoder": use_hw,
-                    "rkmpp_decoder": bool(decoder),
+                    "hardware_backend": hardware_backend,
+                    "hardware_encoder": encoder or None,
+                    "hardware_decoder": decoder or None,
                 },
             )
-            if use_hw:
+            if hardware_backend:
                 allow_cpu_fallback = self.settings.allow_cpu_fallback
                 try:
-                    self._transcode_rkmpp(record, source_path, work_output, profile, decoder, encoder)
+                    if hardware_backend == "rkmpp":
+                        self._transcode_rkmpp(record, source_path, work_output, profile, decoder, encoder)
+                    elif hardware_backend == "nvv4l2":
+                        self._transcode_jetson(record, source_path, work_output, profile, target_codec)
+                    else:
+                        raise RuntimeError(f"Unsupported hardware backend: {hardware_backend}")
                 except RuntimeError as exc:
                     if allow_cpu_fallback:
                         logger.warning(
@@ -378,7 +388,7 @@ class TranscodeEngine:
         scaled_w, scaled_h = self._compute_scaled_dimensions(record, profile)
         target_w, target_h = profile.width, profile.height
 
-        filter_candidates: list[Tuple[str, str]] = []
+        filter_candidates: list[tuple[str, str]] = []
         # Keep a broadly compatible RKMPP path: this filter chain works across
         # current RK1 ffmpeg packages where scale_rkrga format negotiation may fail.
         fallback_filter = f"scale={scaled_w}:{scaled_h},format=nv12"
@@ -386,7 +396,7 @@ class TranscodeEngine:
             fallback_filter += f",pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2"
         filter_candidates.append(("format", fallback_filter))
 
-        decoder_args: List[str] = []
+        decoder_args: list[str] = []
         if decoder_name:
             decoder_args = ["-hwaccel", "rkmpp", "-c:v", decoder_name]
 
@@ -412,17 +422,19 @@ class TranscodeEngine:
                 cmd.extend(["-b:v", bv, "-maxrate", maxrate, "-bufsize", bufsize])
             else:
                 cmd.extend(["-b:v", str(profile.video_bitrate)])
-            cmd.extend([
-                "-g",
-                "240",
-                "-movflags",
-                "+faststart",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "128k",
-                str(dest_path),
-            ])
+            cmd.extend(
+                [
+                    "-g",
+                    "240",
+                    "-movflags",
+                    "+faststart",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "128k",
+                    str(dest_path),
+                ]
+            )
             logger.info(
                 "Running RKMPP ffmpeg",
                 extra={"mode": label, "command": " ".join(cmd[:12]) + " ..."},
@@ -447,11 +459,174 @@ class TranscodeEngine:
             raise last_error
         raise RuntimeError("rk transcode failed")
 
+    def _transcode_jetson(
+        self,
+        record,
+        source_path: Path,
+        dest_path: Path,
+        profile: QualityProfile,
+        codec: CodecPreference,
+    ) -> None:
+        scaled_w, scaled_h = self._compute_scaled_dimensions(record, profile)
+        target_w, target_h = profile.width, profile.height
+        xpos = max(0, (target_w - scaled_w) // 2)
+        ypos = max(0, (target_h - scaled_h) // 2)
+        encoder = "nvv4l2h265enc" if codec == CodecPreference.h265 else "nvv4l2h264enc"
+        parser = "h265parse" if codec == CodecPreference.h265 else "h264parse"
+        video_only = dest_path.with_name(f"{dest_path.stem}.jetson-video.mp4")
+        source_uri = source_path.resolve().as_uri()
+        gst_cmd = [
+            self.settings.gstreamer_command,
+            "-q",
+            "-e",
+            "uridecodebin",
+            f"uri={source_uri}",
+            "!",
+            "queue",
+            "!",
+            "nvvidconv",
+            "compute-hw=0",
+            "interpolation-method=2",
+            "!",
+            f"video/x-raw(memory:NVMM),format=NV12,width={scaled_w},height={scaled_h}",
+            "!",
+            "nvcompositor",
+            "name=comp",
+            "background=black",
+            f"sink_0::xpos={xpos}",
+            f"sink_0::ypos={ypos}",
+            f"sink_0::width={scaled_w}",
+            f"sink_0::height={scaled_h}",
+            "!",
+            f"video/x-raw(memory:NVMM),format=RGBA,width={target_w},height={target_h}",
+            "!",
+            "nvvidconv",
+            "compute-hw=0",
+            "!",
+            f"video/x-raw(memory:NVMM),format=NV12,width={target_w},height={target_h}",
+            "!",
+            encoder,
+            "maxperf-enable=true",
+            f"bitrate={profile.video_bitrate}",
+            "control-rate=1",
+            "iframeinterval=240",
+            "insert-sps-pps=true",
+            "!",
+            parser,
+            "config-interval=-1",
+            "!",
+            "qtmux",
+            "faststart=true",
+            "!",
+            "filesink",
+            f"location={video_only}",
+        ]
+        environment = os.environ.copy()
+        environment["GST_PLUGIN_FEATURE_RANK"] = "nvv4l2decoder:MAX"
+        logger.info(
+            "Running Jetson GStreamer",
+            extra={"backend": "nvv4l2", "encoder": encoder, "target": f"{target_w}x{target_h}"},
+        )
+        try:
+            self._run_gstreamer(
+                gst_cmd,
+                action=f"transcode-nvv4l2-{codec.value}",
+                env=environment,
+                should_cancel=lambda: self._is_cancelled(record),
+            )
+            if not video_only.exists() or video_only.stat().st_size == 0:
+                raise RuntimeError("Jetson GStreamer produced no video output")
+
+            mux_cmd = [
+                self.settings.ffmpeg_command,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                str(video_only),
+                "-i",
+                str(source_path),
+                "-map",
+                "0:v:0",
+                "-map",
+                "1:a:0?",
+                "-c:v",
+                "copy",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "128k",
+                "-shortest",
+                "-movflags",
+                "+faststart",
+            ]
+            if codec == CodecPreference.h265:
+                mux_cmd.extend(["-tag:v", "hvc1"])
+            mux_cmd.append(str(dest_path))
+            duration = record.media_duration_seconds or 0.0
+            self._run_ffmpeg(
+                mux_cmd,
+                action="mux-jetson-audio",
+                progress_handler=lambda seconds: self._update_progress(record, seconds, duration),
+                should_cancel=lambda: self._is_cancelled(record),
+            )
+        finally:
+            try:
+                video_only.unlink()
+            except FileNotFoundError:
+                pass
+
+    def _run_gstreamer(
+        self,
+        cmd: list[str],
+        *,
+        action: str,
+        env: dict[str, str],
+        should_cancel: Callable[[], bool] | None = None,
+    ) -> None:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env,
+        )
+        output_lines: list[str] = []
+        try:
+            while process.poll() is None:
+                if should_cancel and should_cancel():
+                    self._terminate_process(process, action)
+                    raise TranscodeCancelled(f"GStreamer {action} cancelled")
+                if not process.stdout:
+                    continue
+                ready, _, _ = select.select([process.stdout], [], [], 1.0)
+                if not ready:
+                    continue
+                line = process.stdout.readline()
+                if line:
+                    output_lines.append(line)
+            if process.stdout:
+                output_lines.extend(process.stdout.readlines())
+            return_code = process.wait()
+        finally:
+            if process.stdout:
+                process.stdout.close()
+        if return_code != 0:
+            output_data = "".join(output_lines[-80:])
+            logger.error(
+                "GStreamer command failed (%s): %s",
+                action,
+                output_data.strip(),
+                extra={"action": action, "gstreamer_output": output_data},
+            )
+            raise RuntimeError(f"GStreamer {action} failed")
+
     def _output_matches_profile(
         self,
         output_path: Path,
         profile: QualityProfile,
-    ) -> tuple[bool, Optional[tuple[int, int]]]:
+    ) -> tuple[bool, tuple[int, int] | None]:
         """Check whether the rendered output respects the requested profile constraints."""
 
         try:
@@ -479,8 +654,8 @@ class TranscodeEngine:
         cmd: list[str],
         action: str,
         env: dict[str, str] | None = None,
-        progress_handler: Optional[Callable[[float], None]] = None,
-        should_cancel: Optional[Callable[[], bool]] = None,
+        progress_handler: Callable[[float], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> None:
         logger.info("Running ffmpeg", extra={"action": action, "command": " ".join(cmd)})
         wrapped_cmd = [cmd[0], "-progress", "pipe:1", "-nostats"] + cmd[1:]
@@ -532,7 +707,7 @@ class TranscodeEngine:
         self,
         line: str,
         output_lines: list[str],
-        progress_handler: Optional[Callable[[float], None]],
+        progress_handler: Callable[[float], None] | None,
     ) -> None:
         if progress_handler and line.startswith("out_time_ms="):
             try:
@@ -555,7 +730,9 @@ class TranscodeEngine:
             process.wait(timeout=10)
 
     def _is_cancelled(self, record) -> bool:
-        return bool(getattr(record, "cancel_requested", False) or getattr(record, "status", None) == JobStatus.cancelled)
+        return bool(
+            getattr(record, "cancel_requested", False) or getattr(record, "status", None) == JobStatus.cancelled
+        )
 
     def _query_ffmpeg_list(self, list_type: str) -> set[str]:
         ffmpeg = shutil.which(self.settings.ffmpeg_command)
@@ -594,6 +771,43 @@ class TranscodeEngine:
             encoder_name = None
         use_hw = bool(encoder_name)
         return use_hw, decoder_name or "", encoder_name or ""
+
+    def _select_hardware_codecs(
+        self,
+        info: MediaInfo,
+        target_codec: CodecPreference,
+    ) -> tuple[str | None, str, str]:
+        if self.settings.worker_backend == "rkmpp":
+            use_hw, decoder, encoder = self._select_rkmpp_codecs(info, target_codec)
+            return ("rkmpp" if use_hw else None), decoder, encoder
+        if self.settings.worker_backend == "nvv4l2":
+            use_hw, decoder, encoder = self._select_jetson_codecs(info, target_codec)
+            return ("nvv4l2" if use_hw else None), decoder, encoder
+        return None, "", ""
+
+    def _select_jetson_codecs(
+        self,
+        info: MediaInfo,
+        target_codec: CodecPreference,
+    ) -> tuple[bool, str, str]:
+        encoder = "nvv4l2h265enc" if target_codec == CodecPreference.h265 else "nvv4l2h264enc"
+        if not gstreamer_feature_available(self.settings, encoder):
+            return False, "", ""
+        decoder = ""
+        source_codec = (info.video.codec_name or "").lower() if info.video else ""
+        normalized_codec = {
+            "avc1": "h264",
+            "avc": "h264",
+            "hevc": "h265",
+            "hvc1": "h265",
+            "mjpeg": "jpeg",
+        }.get(
+            source_codec,
+            source_codec,
+        )
+        if normalized_codec in JETSON_DECODERS and gstreamer_feature_available(self.settings, "nvv4l2decoder"):
+            decoder = "nvv4l2decoder"
+        return True, decoder, encoder
 
     def _rkmpp_decoder_name(self, codec_name: str) -> str | None:
         codec = codec_name.lower()
@@ -638,7 +852,7 @@ class TranscodeEngine:
             record.media_duration_seconds = media_duration
         record.updated_at = datetime.utcnow()
 
-    def _compute_scaled_dimensions(self, record, profile: QualityProfile) -> Tuple[int, int]:
+    def _compute_scaled_dimensions(self, record, profile: QualityProfile) -> tuple[int, int]:
         target_w = profile.width
         target_h = profile.height
         src_w = record.source_width or target_w

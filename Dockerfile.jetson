@@ -1,0 +1,53 @@
+# syntax=docker/dockerfile:1
+# Python's Bullseye build shares glibc 2.31 with the Ubuntu 20.04-based L4T
+# image, allowing a current Python without replacing NVIDIA's user-space stack.
+ARG PYTHON_IMAGE=python:3.13-slim-bullseye
+ARG JETSON_BASE_IMAGE=nvcr.io/nvidia/l4t-tensorrt:r8.5.2-runtime
+FROM ${PYTHON_IMAGE} AS python-runtime
+
+# JetPack 5 / L4T R35 uses CUDA 11.4 and TensorRT 8.5.2. Keep this base aligned
+# with the host BSP.
+FROM ${JETSON_BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+    ca-certificates curl tzdata \
+    ffmpeg \
+    gstreamer1.0-libav \
+    gstreamer1.0-plugins-bad \
+    gstreamer1.0-plugins-base \
+    gstreamer1.0-plugins-good \
+    gstreamer1.0-plugins-ugly \
+    gstreamer1.0-tools \
+    tesseract-ocr \
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=python-runtime /usr/local /usr/local
+
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:${PATH}"
+
+WORKDIR /app
+COPY pyproject.toml README.md ./
+RUN pip install --upgrade pip \
+ && python3 -c 'import subprocess, sys, tomllib; project = tomllib.load(open("pyproject.toml", "rb"))["project"]; subprocess.check_call([sys.executable, "-m", "pip", "install", *project["dependencies"]])'
+
+COPY app ./app
+RUN pip install --no-deps .
+
+ENV MEDIA_ENGINE_DATA_ROOT=/worker \
+    MEDIA_ENGINE_INPUT_DIR=/worker/input \
+    MEDIA_ENGINE_OUTPUT_DIR=/worker/output \
+    MEDIA_ENGINE_WORK_DIR=/worker/work \
+    MEDIA_ENGINE_TEMP_DIR=/worker/temp \
+    MEDIA_ENGINE_SELF_TEST_ON_STARTUP=true
+
+RUN mkdir -p /worker/input /worker/output /worker/work /worker/temp /host/proc/device-tree /host/etc
+
+CMD ["python", "-m", "app.worker"]

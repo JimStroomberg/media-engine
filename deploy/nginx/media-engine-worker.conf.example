@@ -1,8 +1,9 @@
-# Optional restricted hostname for standalone Media Engine workers.
+# Optional advanced, restricted hostname for standalone Media Engine workers.
 #
-# Prefer a private VPN and address the control plane over that network. Use
-# this public-host example only when a private route is unavailable. Replace
-# the documentation-only IP allowlist before enabling the server.
+# The recommended simple deployment exposes /v2/internal/* on the normal API
+# hostname and does not need this file. Use this example only when an operator
+# explicitly wants a separate VPN/LAN or IP-allowlisted worker entrypoint.
+# Replace the documentation-only IP allowlist before enabling the server.
 #
 # Set on each standalone worker:
 #   MEDIA_ENGINE_WORKER_API_URL=https://workers.media.example.com

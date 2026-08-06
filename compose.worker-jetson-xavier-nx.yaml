@@ -1,44 +1,37 @@
-name: media-engine-worker-rk1
+name: media-engine-worker-jetson-xavier-nx
 
 services:
   worker:
-    image: ${MEDIA_ENGINE_WORKER_IMAGE:-jimstro/media-engine:rk1-0.4.0}
+    image: ${MEDIA_ENGINE_WORKER_IMAGE:-jimstro/media-engine:jetson-xavier-nx-0.4.0}
     pull_policy: ${MEDIA_ENGINE_WORKER_PULL_POLICY:-always}
-    hostname: ${MEDIA_ENGINE_WORKER_HOSTNAME:-media-engine-worker-rk1}
+    hostname: ${MEDIA_ENGINE_WORKER_HOSTNAME:-media-engine-worker-jetson-xavier-nx}
     restart: unless-stopped
     init: true
-    privileged: true
+    runtime: nvidia
     environment:
       MEDIA_ENGINE_WORKER_API_URL: ${MEDIA_ENGINE_WORKER_API_URL:?Set the HTTPS control-plane URL}
       MEDIA_ENGINE_WORKER_TOKEN: ${MEDIA_ENGINE_WORKER_TOKEN:?Create a worker in the dashboard and paste its token}
-      MEDIA_ENGINE_WORKER_BACKEND: rkmpp
-      MEDIA_ENGINE_WORKER_PROFILE: ${MEDIA_ENGINE_WORKER_PROFILE:-rk1}
+      MEDIA_ENGINE_WORKER_BACKEND: nvv4l2
+      MEDIA_ENGINE_WORKER_PROFILE: jetson-xavier-nx
       MEDIA_ENGINE_WORKER_HEARTBEAT_SECONDS: ${MEDIA_ENGINE_WORKER_HEARTBEAT_SECONDS:-20}
       MEDIA_ENGINE_WORKER_POLL_SECONDS: ${MEDIA_ENGINE_WORKER_POLL_SECONDS:-2}
       MEDIA_ENGINE_SELF_TEST_ON_STARTUP: "true"
-      MEDIA_ENGINE_REQUIRE_RK_ACCEL: "true"
+      MEDIA_ENGINE_REQUIRE_JETSON_ACCEL: "true"
       MEDIA_ENGINE_ALLOW_CPU_FALLBACK: "false"
       MEDIA_ENGINE_INPUT_DIR: /worker/input
       MEDIA_ENGINE_WORK_DIR: /worker/work
       MEDIA_ENGINE_OUTPUT_DIR: /worker/output
       MEDIA_ENGINE_TEMP_DIR: /worker/temp
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
     volumes:
       - worker-scratch:/worker
-    devices:
-      - /dev/dri:/dev/dri
-      - /dev/mpp_service:/dev/mpp_service
-      - /dev/rga:/dev/rga
-      - /dev/dma_heap:/dev/dma_heap
-    device_cgroup_rules:
-      - "c 199:* rmw"
-      - "c 29:* rmw"
-      - "c 226:* rmw"
-      - "c 240:* rmw"
+      - /proc/device-tree/model:/host/proc/device-tree/model:ro
+      - /etc/nv_tegra_release:/host/etc/nv_tegra_release:ro
     security_opt:
-      - seccomp:unconfined
-    cap_add:
-      - SYS_ADMIN
-      - SYS_RAWIO
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     command: ["python", "-m", "app.worker"]
     stop_grace_period: 2m
 
