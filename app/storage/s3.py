@@ -18,6 +18,14 @@ class StoredObject:
     etag: str | None
 
 
+@dataclass(frozen=True)
+class ObjectInfo:
+    size_bytes: int
+    media_type: str | None
+    metadata: dict[str, str]
+    etag: str | None
+
+
 class S3Store:
     """Small asynchronous facade around the blocking boto3 S3 client."""
 
@@ -29,6 +37,10 @@ class S3Store:
         public_endpoint = settings.s3_public_endpoint_url or settings.s3_endpoint_url
         self.public_client = (
             self.client if public_endpoint == settings.s3_endpoint_url else self._create_client(public_endpoint)
+        )
+        worker_endpoint = settings.s3_worker_endpoint_url or public_endpoint
+        self.worker_client = (
+            self.client if worker_endpoint == settings.s3_endpoint_url else self._create_client(worker_endpoint)
         )
         self.bucket = settings.s3_bucket
         self.region = settings.s3_region
@@ -71,14 +83,22 @@ class S3Store:
         await self.check_bucket()
 
     async def exists(self, key: str) -> bool:
+        return await self.stat(key) is not None
+
+    async def stat(self, key: str) -> ObjectInfo | None:
         try:
-            await asyncio.to_thread(self.client.head_object, Bucket=self.bucket, Key=key)
-            return True
+            response = await asyncio.to_thread(self.client.head_object, Bucket=self.bucket, Key=key)
         except ClientError as exc:
             code = str(exc.response.get("Error", {}).get("Code", ""))
             if code in {"404", "NoSuchKey", "NotFound"}:
-                return False
+                return None
             raise
+        return ObjectInfo(
+            size_bytes=int(response["ContentLength"]),
+            media_type=response.get("ContentType"),
+            metadata={str(key): str(value) for key, value in response.get("Metadata", {}).items()},
+            etag=str(response.get("ETag", "")).strip('"') or None,
+        )
 
     async def upload_file(
         self,
@@ -115,6 +135,43 @@ class S3Store:
             Params=params,
             ExpiresIn=expires_in,
         )
+
+    def create_worker_download_url(self, key: str, *, expires_in: int) -> str:
+        return self.worker_client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": self.bucket, "Key": key},
+            ExpiresIn=expires_in,
+        )
+
+    def create_upload_url(
+        self,
+        key: str,
+        *,
+        expires_in: int,
+        sha256: str,
+        size_bytes: int,
+        media_type: str | None,
+    ) -> tuple[str, dict[str, str]]:
+        params: dict[str, object] = {
+            "Bucket": self.bucket,
+            "Key": key,
+            "ContentLength": size_bytes,
+            "Metadata": {"sha256": sha256},
+        }
+        headers = {
+            "Content-Length": str(size_bytes),
+            "x-amz-meta-sha256": sha256,
+        }
+        if media_type:
+            params["ContentType"] = media_type
+            headers["Content-Type"] = media_type
+        url = self.worker_client.generate_presigned_url(
+            "put_object",
+            Params=params,
+            ExpiresIn=expires_in,
+            HttpMethod="PUT",
+        )
+        return url, headers
 
     async def delete(self, key: str) -> None:
         await asyncio.to_thread(self.client.delete_object, Bucket=self.bucket, Key=key)

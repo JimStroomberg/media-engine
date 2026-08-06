@@ -5,12 +5,13 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from .. import __version__
 from ..config import Settings, get_settings
 from ..persistence.models import (
     AIUsageEvent,
@@ -20,6 +21,7 @@ from ..persistence.models import (
     WebhookDeliveryAttempt,
     WebhookEndpoint,
     WebhookEvent,
+    Worker,
 )
 from ..security import CredentialCipher
 from ..services.access import ALL_CLIENT_SCOPES, AccessService, ApiKeyConflict, ClientConflict
@@ -34,6 +36,11 @@ from ..services.webhooks import (
     WebhookConflict,
     WebhookDestinationRejected,
     WebhookEndpointService,
+)
+from ..services.worker_access import (
+    WorkerAccessService,
+    WorkerRemovalConflict,
+    WorkerStateConflict,
 )
 from .auth import get_credential_cipher, require_admin
 from .v2 import database_session
@@ -141,6 +148,50 @@ class ApiKeyResponse(BaseModel):
 
 class ApiKeyCreatedResponse(ApiKeyResponse):
     api_key: str
+
+
+class WorkerCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str = Field(min_length=1, max_length=255)
+    profile: str = Field(default="cpu", pattern=r"^[a-z0-9][a-z0-9._-]{0,63}$")
+    expires_at: datetime | None = None
+
+
+class WorkerUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str | None = Field(default=None, min_length=1, max_length=255)
+    profile: str | None = Field(default=None, pattern=r"^[a-z0-9][a-z0-9._-]{0,63}$")
+
+
+class WorkerTokenRotateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expires_at: datetime | None = None
+
+
+class ManagedWorkerResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    worker_id: uuid.UUID
+    worker_key: str
+    display_name: str
+    profile: str
+    status: str
+    desired_state: str
+    credential_prefix: str | None
+    credential_created_at: datetime | None
+    credential_expires_at: datetime | None
+    credential_last_used_at: datetime | None
+    credential_revoked_at: datetime | None
+    created_at: datetime
+
+
+class ManagedWorkerCreatedResponse(ManagedWorkerResponse):
+    worker_token: str
+    worker_api_url: str | None
+    release_version: str
 
 
 class UsageEventResponse(BaseModel):
@@ -280,6 +331,32 @@ def api_key_response(api_key: ApiKey) -> ApiKeyResponse:
     )
 
 
+def managed_worker_response(worker: Worker) -> ManagedWorkerResponse:
+    return ManagedWorkerResponse(
+        worker_id=worker.id,
+        worker_key=worker.worker_key,
+        display_name=worker.display_name,
+        profile=worker.profile,
+        status=worker.status,
+        desired_state=worker.desired_state,
+        credential_prefix=worker.credential_prefix,
+        credential_created_at=worker.credential_created_at,
+        credential_expires_at=worker.credential_expires_at,
+        credential_last_used_at=worker.credential_last_used_at,
+        credential_revoked_at=worker.credential_revoked_at,
+        created_at=worker.created_at,
+    )
+
+
+async def managed_worker_or_404(session: AsyncSession, worker_id: uuid.UUID) -> Worker:
+    worker = await session.scalar(
+        select(Worker).where(Worker.id == worker_id, Worker.removed_at.is_(None))
+    )
+    if worker is None:
+        raise HTTPException(status_code=404, detail="Worker not found")
+    return worker
+
+
 def webhook_endpoint_response(endpoint: WebhookEndpoint) -> WebhookEndpointResponse:
     return WebhookEndpointResponse(
         webhook_endpoint_id=endpoint.id,
@@ -331,6 +408,118 @@ def webhook_event_response(event: WebhookEvent) -> WebhookEventResponse:
             for attempt in sorted(attempts, key=lambda value: value.attempt_number)
         ],
     )
+
+
+@router.post("/workers", response_model=ManagedWorkerCreatedResponse, status_code=status.HTTP_201_CREATED)
+async def create_worker(
+    payload: WorkerCreateRequest,
+    settings: Settings = Depends(get_settings),
+    session: AsyncSession = Depends(database_session),
+) -> ManagedWorkerCreatedResponse:
+    worker, generated = await WorkerAccessService().create(
+        session,
+        display_name=payload.display_name,
+        profile=payload.profile,
+        expires_at=payload.expires_at,
+    )
+    response = managed_worker_response(worker)
+    return ManagedWorkerCreatedResponse(
+        **response.model_dump(),
+        worker_token=generated.token,
+        worker_api_url=settings.worker_advertised_api_url,
+        release_version=__version__,
+    )
+
+
+@router.patch("/workers/{worker_id}", response_model=ManagedWorkerResponse)
+async def update_worker(
+    worker_id: uuid.UUID,
+    payload: WorkerUpdateRequest,
+    session: AsyncSession = Depends(database_session),
+) -> ManagedWorkerResponse:
+    worker = await managed_worker_or_404(session, worker_id)
+    worker = await WorkerAccessService().update(
+        session,
+        worker,
+        display_name=payload.display_name,
+        profile=payload.profile,
+    )
+    return managed_worker_response(worker)
+
+
+@router.post("/workers/{worker_id}/rotate-token", response_model=ManagedWorkerCreatedResponse)
+async def rotate_worker_token(
+    worker_id: uuid.UUID,
+    payload: WorkerTokenRotateRequest,
+    settings: Settings = Depends(get_settings),
+    session: AsyncSession = Depends(database_session),
+) -> ManagedWorkerCreatedResponse:
+    worker = await managed_worker_or_404(session, worker_id)
+    generated = await WorkerAccessService().rotate(session, worker, expires_at=payload.expires_at)
+    response = managed_worker_response(worker)
+    return ManagedWorkerCreatedResponse(
+        **response.model_dump(),
+        worker_token=generated.token,
+        worker_api_url=settings.worker_advertised_api_url,
+        release_version=__version__,
+    )
+
+
+@router.post("/workers/{worker_id}/drain", response_model=ManagedWorkerResponse)
+async def drain_worker(
+    worker_id: uuid.UUID,
+    session: AsyncSession = Depends(database_session),
+) -> ManagedWorkerResponse:
+    worker = await managed_worker_or_404(session, worker_id)
+    try:
+        worker = await WorkerAccessService().set_desired_state(session, worker, "draining")
+    except WorkerStateConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return managed_worker_response(worker)
+
+
+@router.post("/workers/{worker_id}/activate", response_model=ManagedWorkerResponse)
+async def activate_worker(
+    worker_id: uuid.UUID,
+    session: AsyncSession = Depends(database_session),
+) -> ManagedWorkerResponse:
+    worker = await managed_worker_or_404(session, worker_id)
+    try:
+        worker = await WorkerAccessService().set_desired_state(session, worker, "active")
+    except WorkerStateConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return managed_worker_response(worker)
+
+
+@router.post("/workers/{worker_id}/revoke", response_model=ManagedWorkerResponse)
+async def revoke_worker(
+    worker_id: uuid.UUID,
+    session: AsyncSession = Depends(database_session),
+) -> ManagedWorkerResponse:
+    worker = await managed_worker_or_404(session, worker_id)
+    worker = await WorkerAccessService().set_desired_state(session, worker, "revoked")
+    return managed_worker_response(worker)
+
+
+@router.delete("/workers/{worker_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def remove_worker(
+    worker_id: uuid.UUID,
+    settings: Settings = Depends(get_settings),
+    session: AsyncSession = Depends(database_session),
+) -> Response:
+    worker = await managed_worker_or_404(session, worker_id)
+    if settings.initial_worker_token and worker.worker_key == settings.initial_worker_key:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Remove the bundled worker from the deployment configuration before removing its managed record"
+            ),
+        )
+    try:
+        await WorkerAccessService().remove(session, worker)
+    except WorkerRemovalConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/providers", response_model=list[ProviderResponse])

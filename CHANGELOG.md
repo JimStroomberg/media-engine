@@ -4,10 +4,27 @@ All notable Media Engine changes are documented here.
 
 ## Unreleased
 
+### Added
+
+- Individually revocable worker identities with one-time tokens, server-bound identity, expiry metadata, and dashboard
+  controls for creation, rename, drain/resume, rotation, revocation, and audit-preserving removal.
+- Short-lived signed S3 downloads and uploads for worker stage transfers, including stored size and SHA-256 metadata
+  verification before artifact publication.
+- Minimal one-container CPU and RK1 deployments that need only a worker-facing API URL and their own token.
+
 ### Changed
 
 - Disabled unavailable local build-record uploads and Docker-specific job summaries for Docker Build Cloud while
   retaining SBOM and provenance attestations.
+- Worker flavour is now a generic packaging profile plus advertised capabilities. The control plane schedules by
+  capability rather than hardware-specific branches, leaving room for Jetson, NVENC, VA-API, and other images.
+- Existing shared-token worker rows are disabled by migration and must be re-enrolled with an individual credential.
+
+### Fixed
+
+- Worker HTTP logging and transfer exceptions no longer expose presigned S3 URLs.
+- Restarting the control plane no longer undoes a bundled worker drain, revocation, expiry, or dashboard token rotation;
+  stale bundled-token environment values now fail startup explicitly.
 
 ## 0.2.2 - 2026-07-25
 

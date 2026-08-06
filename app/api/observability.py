@@ -80,10 +80,19 @@ class WorkerResponse(BaseModel):
     worker_id: uuid.UUID
     worker_key: str
     display_name: str
+    profile: str
     status: str
+    desired_state: str
     capabilities: dict[str, Any]
-    registered_at: datetime
-    last_seen_at: datetime
+    runtime: dict[str, Any]
+    credential_prefix: str | None
+    credential_created_at: datetime | None
+    credential_expires_at: datetime | None
+    credential_last_used_at: datetime | None
+    credential_revoked_at: datetime | None
+    created_at: datetime
+    registered_at: datetime | None
+    last_seen_at: datetime | None
     active_stage: ActiveWorkerStageResponse | None
 
 
@@ -200,8 +209,11 @@ class JobDetailResponse(BaseModel):
     estimated_cost_usd: Decimal
 
 
-async def _status_counts(session: AsyncSession, model) -> CountByStatus:
-    rows = await session.execute(select(model.status, func.count()).group_by(model.status))
+async def _status_counts(session: AsyncSession, model, *criteria: Any) -> CountByStatus:
+    statement = select(model.status, func.count()).group_by(model.status)
+    if criteria:
+        statement = statement.where(*criteria)
+    rows = await session.execute(statement)
     values = {status: count for status, count in rows}
     status_values = {
         key: values.get(key, 0)
@@ -214,7 +226,7 @@ async def _status_counts(session: AsyncSession, model) -> CountByStatus:
 @router.get("/overview", response_model=OverviewResponse)
 async def overview(session: AsyncSession = Depends(database_session)) -> OverviewResponse:
     cutoff = datetime.now(UTC) - timedelta(hours=24)
-    workers = await _status_counts(session, Worker)
+    workers = await _status_counts(session, Worker, Worker.removed_at.is_(None))
     jobs = await _status_counts(session, JobRequest)
     active_stages = await session.scalar(select(func.count()).select_from(StageRun).where(StageRun.status == "running"))
     clients = await session.scalar(select(func.count()).select_from(ClientProject))
@@ -252,7 +264,11 @@ async def overview(session: AsyncSession = Depends(database_session)) -> Overvie
 
 @router.get("/workers", response_model=list[WorkerResponse])
 async def list_workers(session: AsyncSession = Depends(database_session)) -> list[WorkerResponse]:
-    workers = list(await session.scalars(select(Worker).order_by(Worker.display_name)))
+    workers = list(
+        await session.scalars(
+            select(Worker).where(Worker.removed_at.is_(None)).order_by(Worker.display_name)
+        )
+    )
     active_stages = list(
         await session.scalars(
             select(StageRun)
@@ -281,8 +297,17 @@ async def list_workers(session: AsyncSession = Depends(database_session)) -> lis
                 worker_id=worker.id,
                 worker_key=worker.worker_key,
                 display_name=worker.display_name,
+                profile=worker.profile,
                 status=worker.status,
+                desired_state=worker.desired_state,
                 capabilities=dict(worker.capabilities),
+                runtime=dict(worker.runtime),
+                credential_prefix=worker.credential_prefix,
+                credential_created_at=worker.credential_created_at,
+                credential_expires_at=worker.credential_expires_at,
+                credential_last_used_at=worker.credential_last_used_at,
+                credential_revoked_at=worker.credential_revoked_at,
+                created_at=worker.created_at,
                 registered_at=worker.registered_at,
                 last_seen_at=worker.last_seen_at,
                 active_stage=active,

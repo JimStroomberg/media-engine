@@ -55,7 +55,7 @@ jobs:
         run: |
           export POSTGRES_PASSWORD=compose-validation-postgres
           export MINIO_ROOT_PASSWORD=compose-validation-minio
-          export MEDIA_ENGINE_WORKER_API_TOKEN=compose-validation-worker-token
+          export MEDIA_ENGINE_LOCAL_WORKER_TOKEN=mew_0123456789ab_compose-validation-local-worker-secret
           export MEDIA_ENGINE_ADMIN_USERNAME=admin
           export MEDIA_ENGINE_ADMIN_PASSWORD=compose-validation-admin
           export MEDIA_ENGINE_ADMIN_SESSION_SECRET=compose-validation-session-secret-at-least-32-characters
@@ -67,9 +67,7 @@ jobs:
           docker compose -f compose.portainer-rk1.yaml config --quiet
 
           export MEDIA_ENGINE_WORKER_API_URL=https://media-engine.example.test
-          export MEDIA_ENGINE_WORKER_KEY=compose-validation-worker
-          export MEDIA_ENGINE_WORKER_DISPLAY_NAME="Compose validation worker"
-          export MEDIA_ENGINE_S3_BUCKET=media-engine
+          export MEDIA_ENGINE_WORKER_TOKEN=mew_abcdef012345_compose-validation-remote-worker-secret
           docker compose -f compose.worker.yaml config --quiet
           docker compose -f compose.worker-rk1.yaml config --quiet
 

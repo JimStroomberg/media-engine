@@ -39,7 +39,7 @@ ensure_value() {
 ensure_value POSTGRES_PASSWORD "$(openssl rand -hex 24)"
 ensure_value MINIO_ROOT_USER media-engine
 ensure_value MINIO_ROOT_PASSWORD "$(openssl rand -hex 32)"
-ensure_value MEDIA_ENGINE_WORKER_API_TOKEN "$(openssl rand -hex 40)"
+ensure_value MEDIA_ENGINE_LOCAL_WORKER_TOKEN "mew_$(openssl rand -hex 6)_$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"
 ensure_value MEDIA_ENGINE_ADMIN_USERNAME admin
 ensure_value MEDIA_ENGINE_ADMIN_PASSWORD "$(openssl rand -base64 36 | tr -d '\n')"
 ensure_value MEDIA_ENGINE_ADMIN_SESSION_SECRET "$(openssl rand -base64 48 | tr -d '\n')"

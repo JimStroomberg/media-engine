@@ -224,6 +224,14 @@ header. The management contract includes:
 
 - `GET /v2/admin/overview`: summarize job, stage, worker, client, provider, webhook, and recent usage health;
 - `GET /v2/admin/workers`: list worker state, heartbeat, capabilities, and current lease;
+- `POST /v2/admin/workers`: create a worker identity and return its token once;
+- `PATCH /v2/admin/workers/{worker_id}`: rename or change the packaging profile;
+- `POST /v2/admin/workers/{worker_id}/revoke`: immediately revoke worker access;
+- `DELETE /v2/admin/workers/{worker_id}`: remove an already-revoked worker from fleet views while retaining its
+  historical job attribution;
+- `POST /v2/admin/workers/{worker_id}/drain`: finish active work without accepting a new claim;
+- `POST /v2/admin/workers/{worker_id}/activate`: resume scheduling after draining;
+- `POST /v2/admin/workers/{worker_id}/rotate-token`: invalidate the current token and return its replacement once;
 - `GET /v2/admin/jobs`: filter and page job history by status, pipeline, or client;
 - `GET /v2/admin/jobs/{job_id}`: inspect its run, source, stages, artifacts, provider usage, and webhook events;
 
@@ -277,14 +285,17 @@ Client requests may supply an idempotency key and client job ID. Idempotency pre
 - `POST /v2/internal/workers/register`: idempotently register identity and capabilities;
 - `POST /v2/internal/stages/claim`: atomically claim a compatible queued stage;
 - `POST /v2/internal/stages/{id}/heartbeat`: extend a lease and report progress;
+- `POST /v2/internal/stages/{id}/artifacts/prepare-upload`: validate an output declaration and return a short-lived signed
+  S3 PUT URL when the content-addressed object is not already available;
 - `POST /v2/internal/stages/{id}/complete`: atomically publish one or more declared S3 artifacts and advance the DAG;
 - `POST /v2/internal/stages/{id}/fail`: release for retry or fail after the attempt limit.
 
-Internal endpoints require an exact bearer token and are not part of the public product API. Workers access S3 but receive
-no PostgreSQL credentials. Provider-backed claims carry the selected stage's decrypted vendor credential, so keep this API
-on a trusted private network and use TLS, preferably mutual TLS, whenever workers cross a host or trust boundary. A
-standalone worker registers itself using a stable `worker_key`; no administrator-side database preparation is required.
-See [worker-deployment.md](worker-deployment.md) for the deployable CPU/RK1 contract.
+Internal endpoints require an individually issued `mew_...` bearer token and are not part of the public product API. The
+token determines the worker identity; request bodies never select a worker ID. Workers receive signed S3 transfer URLs
+but no PostgreSQL or permanent S3 credentials. Provider-backed claims carry the selected stage's decrypted vendor
+credential, so keep this API on a trusted private network and use TLS whenever workers cross a host boundary. Create the
+identity through the dashboard or management API before starting a standalone worker. See
+[worker-deployment.md](worker-deployment.md) for the deployable CPU/RK1 contract.
 
 ## Generated documentation
 

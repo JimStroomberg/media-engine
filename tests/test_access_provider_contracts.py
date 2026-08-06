@@ -9,10 +9,10 @@ from fastapi.testclient import TestClient
 from app.config import Settings, get_settings, validate_control_plane_configuration
 from app.main import app
 from app.processors.usage import capture_provider_usage, mark_usage_outcome, record_provider_usage
-from app.security import AdminSessionManager, CredentialCipher, generate_api_key, hash_api_key
+from app.security import AdminSessionManager, CredentialCipher, generate_api_key, generate_worker_token, hash_api_key
 
 
-def test_control_plane_credentials_are_required_together() -> None:
+def test_control_plane_credentials_are_required_without_a_global_worker_token() -> None:
     with pytest.raises(RuntimeError, match="MEDIA_ENGINE_ADMIN_USERNAME"):
         validate_control_plane_configuration(Settings(_env_file=None))
 
@@ -23,7 +23,6 @@ def test_control_plane_credentials_are_required_together() -> None:
             admin_password="password",
             admin_session_secret="s" * 48,
             credential_encryption_key=Fernet.generate_key().decode("ascii"),
-            worker_api_token="worker-token",
         )
     )
 
@@ -42,6 +41,14 @@ def test_generated_api_keys_are_high_entropy_and_hashable() -> None:
     generated = generate_api_key()
 
     assert generated.token.startswith(f"me_{generated.prefix}_")
+    assert generated.token_hash == hash_api_key(generated.token)
+    assert len(generated.token_hash) == 64
+
+
+def test_generated_worker_tokens_are_separate_high_entropy_credentials() -> None:
+    generated = generate_worker_token()
+
+    assert generated.token.startswith(f"mew_{generated.prefix}_")
     assert generated.token_hash == hash_api_key(generated.token)
     assert len(generated.token_hash) == 64
 
@@ -135,6 +142,13 @@ def test_management_observability_contract_is_in_openapi() -> None:
 
     assert "/v2/admin/overview" in paths
     assert "/v2/admin/workers" in paths
+    assert "post" in paths["/v2/admin/workers"]
+    assert "/v2/admin/workers/{worker_id}/drain" in paths
+    assert "/v2/admin/workers/{worker_id}/activate" in paths
+    assert "/v2/admin/workers/{worker_id}/revoke" in paths
+    assert "/v2/admin/workers/{worker_id}/rotate-token" in paths
+    assert "delete" in paths["/v2/admin/workers/{worker_id}"]
+    assert "/v2/internal/stages/{stage_id}/artifacts/prepare-upload" in paths
     assert "/v2/admin/jobs" in paths
     assert "/v2/admin/jobs/{job_id}" in paths
 

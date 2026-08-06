@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import secrets
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,6 +14,7 @@ from ..domain.pipelines import get_pipeline
 from ..persistence.models import Artifact, StageRun, Worker
 from ..security import CredentialCipher
 from ..services.providers import ProviderConfigurationService, RuntimeProviderConnection
+from ..services.worker_access import WorkerAccessService, WorkerPrincipal
 from ..services.workers import (
     ArtifactCompletion,
     ArtifactRejected,
@@ -26,56 +27,56 @@ from ..storage.s3 import S3Store
 from .auth import get_credential_cipher
 from .v2 import database_session, get_s3_store
 
+worker_bearer = HTTPBearer(auto_error=False)
 
-def require_worker_auth(
-    authorization: Annotated[str | None, Header()] = None,
-    settings: Settings = Depends(get_settings),
-) -> None:
-    if not settings.worker_api_token:
-        raise HTTPException(status_code=503, detail="Internal worker API is not configured")
-    expected = f"Bearer {settings.worker_api_token}"
-    if authorization is None or not secrets.compare_digest(authorization, expected):
+
+async def require_worker_auth(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(worker_bearer)],
+    session: AsyncSession = Depends(database_session),
+) -> WorkerPrincipal:
+    if credentials is None or credentials.scheme.lower() != "bearer":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid worker credentials",
+            detail="A worker token is required",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    principal = await WorkerAccessService().authenticate(session, credentials.credentials)
+    if principal is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid, expired, or revoked worker credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return principal
 
 
-router = APIRouter(
-    prefix="/v2/internal",
-    tags=["internal-workers"],
-    dependencies=[Depends(require_worker_auth)],
-)
+router = APIRouter(prefix="/v2/internal", tags=["internal-workers"])
 
 
 class WorkerRegisterRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    worker_key: str = Field(min_length=1, max_length=255)
-    display_name: str = Field(min_length=1, max_length=255)
     capabilities: dict[str, list[str]]
+    runtime: dict[str, Any] = Field(default_factory=dict)
 
 
 class WorkerResponse(BaseModel):
     worker_id: uuid.UUID
     worker_key: str
     display_name: str
+    profile: str
     capabilities: dict[str, Any]
+    runtime: dict[str, Any]
     status: str
-    registered_at: datetime
-    last_seen_at: datetime
-
-
-class StageClaimRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    worker_id: uuid.UUID
+    desired_state: str
+    created_at: datetime
+    registered_at: datetime | None
+    last_seen_at: datetime | None
 
 
 class StageSourceResponse(BaseModel):
-    bucket: str
-    object_key: str
+    download_url: str
+    download_url_expires_at: datetime
     sha256: str
     size_bytes: int
     media_type: str | None
@@ -137,9 +138,27 @@ class ProviderUsageRequest(BaseModel):
 class StageHeartbeatRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    worker_id: uuid.UUID
     lease_token: uuid.UUID
     progress: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
+class ArtifactUploadPrepareRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    lease_token: uuid.UUID
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    size_bytes: int = Field(gt=0)
+    media_type: str | None = Field(default=None, max_length=255)
+    artifact_type: str = Field(min_length=1, max_length=128)
+    format: str = Field(min_length=1, max_length=64)
+    schema_version: str = Field(default="1", min_length=1, max_length=64)
+
+
+class ArtifactUploadPrepareResponse(BaseModel):
+    upload_required: bool
+    upload_url: str | None
+    headers: dict[str, str]
+    expires_at: datetime
 
 
 class ArtifactCompletionRequest(BaseModel):
@@ -148,8 +167,6 @@ class ArtifactCompletionRequest(BaseModel):
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     size_bytes: int = Field(gt=0)
     media_type: str | None = Field(default=None, max_length=255)
-    object_key: str = Field(min_length=1)
-    etag: str | None = Field(default=None, max_length=255)
     artifact_type: str = Field(min_length=1, max_length=128)
     format: str = Field(min_length=1, max_length=64)
     schema_version: str = Field(default="1", min_length=1, max_length=64)
@@ -158,7 +175,6 @@ class ArtifactCompletionRequest(BaseModel):
 class StageCompleteRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    worker_id: uuid.UUID
     lease_token: uuid.UUID
     artifacts: list[ArtifactCompletionRequest] = Field(min_length=1, max_length=32)
     usage_events: list[ProviderUsageRequest] = Field(default_factory=list, max_length=100)
@@ -167,7 +183,6 @@ class StageCompleteRequest(BaseModel):
 class StageFailRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    worker_id: uuid.UUID
     lease_token: uuid.UUID
     error_message: str = Field(min_length=1, max_length=4000)
     usage_events: list[ProviderUsageRequest] = Field(default_factory=list, max_length=100)
@@ -187,8 +202,12 @@ def worker_response(worker: Worker) -> WorkerResponse:
         worker_id=worker.id,
         worker_key=worker.worker_key,
         display_name=worker.display_name,
-        capabilities=worker.capabilities,
+        profile=worker.profile,
+        capabilities=dict(worker.capabilities),
+        runtime=dict(worker.runtime),
         status=worker.status,
+        desired_state=worker.desired_state,
+        created_at=worker.created_at,
         registered_at=worker.registered_at,
         last_seen_at=worker.last_seen_at,
     )
@@ -198,6 +217,9 @@ def claim_response(
     stage: StageRun,
     inputs: list[Artifact],
     provider_connection: RuntimeProviderConnection | None,
+    *,
+    store: S3Store,
+    expires_in: int,
 ) -> StageClaimResponse:
     run = stage.pipeline_run
     source = run.source_blob
@@ -205,6 +227,7 @@ def claim_response(
     stage_definition = pipeline.stage(stage.stage_name)
     if stage.lease_token is None or stage.lease_expires_at is None:
         raise RuntimeError("Claimed stage has no active lease")
+    url_expires_at = datetime.now(UTC) + timedelta(seconds=expires_in)
     return StageClaimResponse(
         stage_id=stage.id,
         pipeline_run_id=run.id,
@@ -224,16 +247,16 @@ def claim_response(
             for output in stage_definition.outputs
         ],
         source=StageSourceResponse(
-            bucket=source.bucket,
-            object_key=source.object_key,
+            download_url=store.create_worker_download_url(source.object_key, expires_in=expires_in),
+            download_url_expires_at=url_expires_at,
             sha256=source.sha256,
             size_bytes=source.size_bytes,
             media_type=source.media_type,
         ),
         inputs=[
             StageArtifactInputResponse(
-                bucket=artifact.blob.bucket,
-                object_key=artifact.blob.object_key,
+                download_url=store.create_worker_download_url(artifact.blob.object_key, expires_in=expires_in),
+                download_url_expires_at=url_expires_at,
                 sha256=artifact.blob.sha256,
                 size_bytes=artifact.blob.size_bytes,
                 media_type=artifact.blob.media_type,
@@ -266,22 +289,26 @@ def stage_response(stage: StageRun) -> StageStatusResponse:
 @router.post("/workers/register", response_model=WorkerResponse)
 async def register_worker(
     payload: WorkerRegisterRequest,
+    principal: Annotated[WorkerPrincipal, Depends(require_worker_auth)],
     settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(database_session),
     store: S3Store = Depends(get_s3_store),
 ) -> WorkerResponse:
-    worker = await WorkerService(settings, store).register(
-        session,
-        worker_key=payload.worker_key,
-        display_name=payload.display_name,
-        capabilities=payload.capabilities,
-    )
+    try:
+        worker = await WorkerService(settings, store).register(
+            session,
+            worker_id=principal.worker_id,
+            capabilities=payload.capabilities,
+            runtime=payload.runtime,
+        )
+    except WorkerNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     return worker_response(worker)
 
 
 @router.post("/stages/claim", response_model=StageClaimResponse)
 async def claim_stage(
-    payload: StageClaimRequest,
+    principal: Annotated[WorkerPrincipal, Depends(require_worker_auth)],
     settings: Settings = Depends(get_settings),
     cipher: CredentialCipher = Depends(get_credential_cipher),
     session: AsyncSession = Depends(database_session),
@@ -289,7 +316,7 @@ async def claim_stage(
 ):
     try:
         service = WorkerService(settings, store)
-        stage = await service.claim(session, worker_id=payload.worker_id)
+        stage = await service.claim(session, worker_id=principal.worker_id)
     except WorkerNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     if stage is None:
@@ -298,17 +325,24 @@ async def claim_stage(
     requested_providers = stage.required_capabilities.get("providers", [])
     provider_connection = None
     if requested_providers:
-        provider_connection = await ProviderConfigurationService(
-            settings,
-            cipher,
-        ).runtime_connection(session, str(requested_providers[0]))
-    return claim_response(stage, inputs, provider_connection)
+        provider_connection = await ProviderConfigurationService(settings, cipher).runtime_connection(
+            session,
+            str(requested_providers[0]),
+        )
+    return claim_response(
+        stage,
+        inputs,
+        provider_connection,
+        store=store,
+        expires_in=settings.artifact_url_expiry_seconds,
+    )
 
 
 @router.post("/stages/{stage_id}/heartbeat", response_model=StageStatusResponse)
 async def heartbeat_stage(
     stage_id: uuid.UUID,
     payload: StageHeartbeatRequest,
+    principal: Annotated[WorkerPrincipal, Depends(require_worker_auth)],
     settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(database_session),
     store: S3Store = Depends(get_s3_store),
@@ -316,7 +350,7 @@ async def heartbeat_stage(
     try:
         stage = await WorkerService(settings, store).heartbeat(
             session,
-            worker_id=payload.worker_id,
+            worker_id=principal.worker_id,
             stage_id=stage_id,
             lease_token=payload.lease_token,
             progress=payload.progress,
@@ -326,10 +360,47 @@ async def heartbeat_stage(
     return stage_response(stage)
 
 
+@router.post(
+    "/stages/{stage_id}/artifacts/prepare-upload",
+    response_model=ArtifactUploadPrepareResponse,
+)
+async def prepare_artifact_upload(
+    stage_id: uuid.UUID,
+    payload: ArtifactUploadPrepareRequest,
+    principal: Annotated[WorkerPrincipal, Depends(require_worker_auth)],
+    settings: Settings = Depends(get_settings),
+    session: AsyncSession = Depends(database_session),
+    store: S3Store = Depends(get_s3_store),
+) -> ArtifactUploadPrepareResponse:
+    try:
+        prepared = await WorkerService(settings, store).prepare_artifact_upload(
+            session,
+            worker_id=principal.worker_id,
+            stage_id=stage_id,
+            lease_token=payload.lease_token,
+            sha256=payload.sha256,
+            size_bytes=payload.size_bytes,
+            media_type=payload.media_type,
+            artifact_type=payload.artifact_type,
+            schema_version=payload.schema_version,
+        )
+    except LeaseLost as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ArtifactRejected as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return ArtifactUploadPrepareResponse(
+        upload_required=prepared.upload_required,
+        upload_url=prepared.upload_url,
+        headers=prepared.headers,
+        expires_at=prepared.expires_at,
+    )
+
+
 @router.post("/stages/{stage_id}/complete", response_model=StageStatusResponse)
 async def complete_stage(
     stage_id: uuid.UUID,
     payload: StageCompleteRequest,
+    principal: Annotated[WorkerPrincipal, Depends(require_worker_auth)],
     settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(database_session),
     store: S3Store = Depends(get_s3_store),
@@ -337,7 +408,7 @@ async def complete_stage(
     try:
         stage = await WorkerService(settings, store).complete(
             session,
-            worker_id=payload.worker_id,
+            worker_id=principal.worker_id,
             stage_id=stage_id,
             lease_token=payload.lease_token,
             artifacts=[ArtifactCompletion(**artifact.model_dump()) for artifact in payload.artifacts],
@@ -354,6 +425,7 @@ async def complete_stage(
 async def fail_stage(
     stage_id: uuid.UUID,
     payload: StageFailRequest,
+    principal: Annotated[WorkerPrincipal, Depends(require_worker_auth)],
     settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(database_session),
     store: S3Store = Depends(get_s3_store),
@@ -361,7 +433,7 @@ async def fail_stage(
     try:
         stage = await WorkerService(settings, store).fail(
             session,
-            worker_id=payload.worker_id,
+            worker_id=principal.worker_id,
             stage_id=stage_id,
             lease_token=payload.lease_token,
             error_message=payload.error_message,

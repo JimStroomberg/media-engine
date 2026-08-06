@@ -156,8 +156,10 @@ tbody tr:hover { background: #f9fbff; }
 .status-badge.running::before, .status-badge.processing::before { background: var(--brand); }
 .status-badge.failed, .status-badge.abandoned, .status-badge.disabled, .status-badge.offline { color: var(--red); background: var(--red-soft); }
 .status-badge.failed::before, .status-badge.abandoned::before, .status-badge.disabled::before, .status-badge.offline::before { background: var(--red); }
-.status-badge.queued, .status-badge.retrying { color: var(--amber); background: var(--amber-soft); }
-.status-badge.queued::before, .status-badge.retrying::before { background: var(--amber); }
+.status-badge.revoked { color: var(--red); background: var(--red-soft); }
+.status-badge.revoked::before { background: var(--red); }
+.status-badge.queued, .status-badge.retrying, .status-badge.draining { color: var(--amber); background: var(--amber-soft); }
+.status-badge.queued::before, .status-badge.retrying::before, .status-badge.draining::before { background: var(--amber); }
 .progress-track { width: 74px; height: 5px; overflow: hidden; border-radius: 99px; background: #e8ecf1; }
 .progress-track span { display: block; height: 100%; border-radius: inherit; background: var(--brand); }
 .stage-progress { width: 74px; height: 5px; display: block; overflow: hidden; border: 0; border-radius: 99px; background: #e8ecf1; appearance: none; }
@@ -227,7 +229,7 @@ tbody tr:hover { background: #f9fbff; }
 .dialog-head h2 { margin: 0; font-size: 1.2rem; }
 .dialog-body { padding: 1.25rem 1.3rem 1.4rem; overflow-y: auto; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: .6rem; margin-top: .6rem; padding-top: 1rem; border-top: 1px solid var(--line); }
-.secret-value { display: block; overflow-wrap: anywhere; padding: 1rem; border: 1px solid #cdd9f4; border-radius: 10px; color: #183f8c; background: #f2f6ff; line-height: 1.55; user-select: all; }
+.secret-value { display: block; overflow-wrap: anywhere; padding: 1rem; border: 1px solid #cdd9f4; border-radius: 10px; color: #183f8c; background: #f2f6ff; line-height: 1.55; white-space: pre-wrap; user-select: all; }
 .detail-section { margin-bottom: 1.25rem; }
 .detail-section:last-child { margin: 0; }
 .detail-section > h3 { padding-bottom: .45rem; border-bottom: 1px solid var(--line); }

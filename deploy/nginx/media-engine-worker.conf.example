@@ -7,8 +7,8 @@
 # Set on each standalone worker:
 #   MEDIA_ENGINE_WORKER_API_URL=https://workers.media.example.com
 #
-# This hostname exposes only /v2/internal/* and still requires the shared
-# MEDIA_ENGINE_WORKER_API_TOKEN. It does not expose the dashboard or client API.
+# This hostname exposes only /v2/internal/*. Every request still requires an
+# individually revocable worker token. It does not expose the dashboard or client API.
 
 upstream media_engine_worker_api {
     server 127.0.0.1:8080;

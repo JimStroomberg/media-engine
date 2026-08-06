@@ -39,7 +39,16 @@ Media Engine currently has no external production consumers, so v2 development o
 
 PostgreSQL is the source of truth for state. S3-compatible object storage is the only durable media and artifact store. Worker-local files are temporary scratch data and must be removed after a stage finishes or fails.
 
-Workers do not require direct PostgreSQL access. They register capabilities and claim time-limited leases through authenticated internal API endpoints. S3 access should use narrowly scoped credentials or short-lived signed URLs.
+Workers do not require direct PostgreSQL access. Each administrator-created worker has an individually revocable hashed
+credential, and the token determines its identity on every internal request. Workers register capabilities and claim
+time-limited leases through authenticated internal API endpoints. Inputs and outputs use short-lived signed S3 URLs, so
+nodes do not receive permanent object-store credentials. Presigned URLs are treated as credentials: the worker
+suppresses HTTP client request logging and replaces transfer exceptions with URL-free errors before they reach
+application logs.
+
+Worker retirement is two-step. Revocation immediately disables the credential; removal then hides the node from fleet
+state and erases its credential material. The worker row remains as a tombstone so historical stage and job attribution
+does not disappear.
 
 A lease token identifies one worker attempt. Heartbeats extend the lease while reporting progress. Maintenance requeues an expired lease until its attempt limit is reached, after which the stage, pipeline run, and attached active requests become failed.
 
@@ -52,7 +61,8 @@ A lease token identifies one worker attempt. Heartbeats extend the lease while r
 - `stage_run`: a leased unit of work within a pipeline;
 - `stage_dependency`: a durable edge between two stage runs;
 - `artifact`: a versioned output referencing a stored blob;
-- `worker`: reported capabilities and heartbeat state.
+- `worker`: administrator-owned identity and lifecycle, hashed credential metadata, reported capabilities/runtime, and
+  heartbeat state;
 - `client`: product or integration ownership boundary;
 - `api_key`: hashed, scoped, expiring or revocable client credential;
 - `provider_config`: encrypted AI vendor connection, models, runtime options, and default state;
@@ -74,7 +84,11 @@ Reusable pipeline runs reference the exact source blob, not the first client ass
 
 Pipeline definitions are server-owned and versioned. Submitting a job persists every stage plus dependency edge before work starts. Root stages are queued; dependent stages remain blocked until all their upstream stages complete. Retried stages preserve successful upstream outputs. A pipeline run completes only when every stage completes, and each stage completion is rejected unless all required declared artifacts are reported.
 
-Artifacts record both their reusable pipeline run and exact producer stage. A worker receives the immutable source plus artifacts produced by its direct dependencies, verifies every downloaded SHA-256 and size, and publishes outputs to content-addressed S3 keys. The job manifest exposes this provenance without giving clients database or S3 administrator access.
+Artifacts record both their reusable pipeline run and exact producer stage. A worker receives the immutable source plus
+artifacts produced by its direct dependencies through signed downloads, verifies every SHA-256 and size, requests a
+signed upload for each declared output, and publishes it to a content-addressed S3 key. Completion independently checks
+the stored size and SHA-256 metadata. The job manifest exposes this provenance without giving clients or workers database
+or S3 administrator access.
 
 The latest understanding flow uses a coarse local pass followed by model-planned targeted sampling:
 
@@ -118,9 +132,10 @@ not keep vendor keys in their environment, and close the per-stage provider clie
 stages select their provider independently, and provider/model identity is part of the run key so comparison runs cannot
 collide in the cache.
 
-The worker control API must stay on a trusted private network. Deployments spanning hosts or trust boundaries must add
-TLS, preferably mutual TLS, because a provider-backed claim necessarily carries plaintext credentials to the process
-executing that stage.
+The worker control API should stay on a trusted private network. Deployments spanning hosts must use TLS and restrict the
+worker route because a provider-backed claim necessarily carries plaintext credentials to the process executing that
+stage. Individual token rotation/revocation limits one compromised node without disrupting the rest of the fleet; mutual
+TLS can be added for deployments that require a stronger machine-identity layer.
 
 ## Deployment shapes
 
@@ -130,5 +145,6 @@ accelerator definitions can be local overlays or independent worker deployments.
 
 Docker Compose separates services on one Docker host. A multi-host installation runs the control-plane Compose project on
 one host and a one-service Compose project on each worker node. Remote workers need outbound access to only the
-authenticated worker API and S3; they do not expose ports or receive PostgreSQL, administrator, encryption, webhook, or
-long-lived provider credentials. See [worker-deployment.md](worker-deployment.md).
+authenticated worker API and worker-facing S3 endpoint; they do not expose ports or receive PostgreSQL, administrator,
+encryption, webhook, object-store, or long-lived provider credentials. See
+[worker-deployment.md](worker-deployment.md).

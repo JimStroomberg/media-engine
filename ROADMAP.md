@@ -33,6 +33,8 @@
 - [ ] Retire the legacy API's in-process transcoder after the whY-Tee-WebDL v2 migration.
 - [x] Add an RKMPP worker deployment and route stages by backend capability.
 - [x] Add standalone CPU/RK1 worker Compose deployments with minimal configuration and multi-host documentation.
+- [x] Replace shared worker authentication with individually revocable, identity-bound worker tokens.
+- [x] Replace permanent worker S3 credentials with short-lived signed downloads and uploads.
 - [ ] Validate the RKMPP worker end to end on an RK1 host.
 
 ## Phase 3: artifact pipelines
@@ -76,4 +78,4 @@
 - [x] Add filtering and drill-down views for jobs, runs, stages, artifacts, and provider usage.
 - [ ] Add dedicated retention-state and artifact filtering across jobs.
 - [x] Keep work execution and job state read-only while limiting authenticated actions to explicit configuration management.
-- [ ] Replace the shared worker bootstrap token with individually revocable worker credentials managed through the dashboard.
+- [x] Add worker creation, one-time token generation, drain/resume, rotation, revocation, and removal to the dashboard.

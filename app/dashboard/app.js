@@ -241,16 +241,80 @@ function workerCapabilities(capabilities) {
   }).join("");
 }
 
+function workerDisplayStatus(worker) {
+  return worker.desired_state === "active" ? worker.status : worker.desired_state;
+}
+
+function workerEnvironment(worker, token) {
+  const releaseVersion = worker.release_version || "latest";
+  const image = worker.profile === "rk1"
+    ? `jimstro/media-engine:rk1-${releaseVersion}`
+    : `jimstro/media-engine:${releaseVersion}`;
+  return `# Save as .env.worker and keep it private
+MEDIA_ENGINE_WORKER_API_URL=${worker.worker_api_url || window.location.origin}
+MEDIA_ENGINE_WORKER_TOKEN=${token}
+MEDIA_ENGINE_WORKER_IMAGE=${image}`;
+}
+
 async function loadWorkers() {
   $("#workers-grid").innerHTML = loadingCards(3);
   state.workers = await api("/v2/admin/workers");
   $("#workers-grid").innerHTML = state.workers.length ? state.workers.map((worker) => `
     <article class="worker-card">
-      <div class="entity-head"><div class="entity-title"><div class="entity-icon">${escapeHtml(worker.capabilities?.backends?.[0] || "CPU")}</div><div><h3>${escapeHtml(worker.display_name)}</h3><p>${escapeHtml(worker.worker_key)}</p></div></div>${statusBadge(worker.status)}</div>
-      <div class="meta-grid"><div><span>Last heartbeat</span><strong>${relativeTime(worker.last_seen_at)}</strong></div><div><span>Registered</span><strong>${formatDate(worker.registered_at)}</strong></div></div>
+      <div class="entity-head"><div class="entity-title"><div class="entity-icon">${escapeHtml(worker.capabilities?.backends?.[0] || worker.profile)}</div><div><h3>${escapeHtml(worker.display_name)}</h3><p>${escapeHtml(worker.worker_key)}</p></div></div>${statusBadge(workerDisplayStatus(worker))}</div>
+      <div class="meta-grid"><div><span>Profile</span><strong>${escapeHtml(worker.profile)}</strong></div><div><span>Last heartbeat</span><strong>${relativeTime(worker.last_seen_at)}</strong></div><div><span>Runtime</span><strong>${escapeHtml(worker.runtime?.version || "Not connected")}</strong></div><div><span>Host</span><strong>${escapeHtml(worker.runtime?.hostname || "—")}</strong></div><div><span>Token</span><strong>${worker.credential_prefix ? `mew_${escapeHtml(worker.credential_prefix)}_…` : "Not enrolled"}</strong></div><div><span>Last authenticated</span><strong>${relativeTime(worker.credential_last_used_at)}</strong></div></div>
       <div class="capability-list">${workerCapabilities(worker.capabilities) || '<span class="chip">No capabilities reported</span>'}</div>
-      ${worker.active_stage ? `<div class="active-lease"><strong>${escapeHtml(worker.active_stage.pipeline)} · ${escapeHtml(worker.active_stage.stage)}</strong><span>Attempt ${worker.active_stage.attempt} · ${Math.round((worker.active_stage.progress || 0) * 100)}% · lease ${relativeTime(worker.active_stage.lease_expires_at)}</span></div>` : '<div class="active-lease"><strong>Ready for work</strong><span>No active stage lease</span></div>'}
+      ${worker.active_stage ? `<div class="active-lease"><strong>${escapeHtml(worker.active_stage.pipeline)} · ${escapeHtml(worker.active_stage.stage)}</strong><span>Attempt ${worker.active_stage.attempt} · ${Math.round((worker.active_stage.progress || 0) * 100)}% · lease ${relativeTime(worker.active_stage.lease_expires_at)}</span></div>` : `<div class="active-lease"><strong>${worker.desired_state === "active" ? "Ready for work" : worker.desired_state === "draining" ? "Draining" : "Access revoked"}</strong><span>No active stage lease</span></div>`}
+      <div class="card-actions"><button class="button secondary small" data-worker-action="edit" data-id="${worker.worker_id}">Edit</button>${worker.desired_state === "active" ? `<button class="button secondary small" data-worker-action="drain" data-id="${worker.worker_id}">Drain</button>` : worker.desired_state === "draining" ? `<button class="button secondary small" data-worker-action="activate" data-id="${worker.worker_id}">Resume</button>` : ""}<button class="button secondary small" data-worker-action="rotate" data-id="${worker.worker_id}">Rotate token</button>${worker.desired_state === "revoked" ? `<button class="button danger small" data-worker-action="remove" data-id="${worker.worker_id}">Remove</button>` : `<button class="button danger small" data-worker-action="revoke" data-id="${worker.worker_id}">Revoke</button>`}</div>
     </article>`).join("") : emptyState("No workers registered", "Start a worker to see its heartbeat and capabilities.");
+}
+
+function workerForm(worker = null) {
+  openForm({
+    kicker: worker ? "Worker identity" : "New execution node",
+    title: worker ? `Edit ${worker.display_name}` : "Add worker",
+    submitLabel: worker ? "Save changes" : "Create worker",
+    html: `<label><span>Display name</span><input name="display_name" value="${escapeHtml(worker?.display_name || "")}" required maxlength="255" placeholder="Amsterdam CPU worker 01"></label><label><span>Worker profile</span><input name="profile" list="worker-profile-options" value="${escapeHtml(worker?.profile || "cpu")}" required maxlength="64" pattern="[a-z0-9][a-z0-9._-]{0,63}"><datalist id="worker-profile-options"><option value="cpu"><option value="rk1"><option value="jetson"><option value="intel-qsv"><option value="amd-vaapi"></datalist></label>${worker ? "" : '<label><span>Token expiry (optional)</span><input name="expires_at" type="datetime-local"></label>'}`,
+    onSubmit: async (data) => {
+      const payload = { display_name: data.get("display_name"), profile: data.get("profile") };
+      if (worker) {
+        await api(`/v2/admin/workers/${worker.worker_id}`, { method: "PATCH", body: payload });
+        toast("Worker updated");
+      } else {
+        const expiresAt = data.get("expires_at");
+        payload.expires_at = expiresAt ? new Date(expiresAt).toISOString() : null;
+        const created = await api("/v2/admin/workers", { method: "POST", body: payload });
+        showSecret("Save this worker configuration", "The token cannot be retrieved after you close this window. Put these values in .env.worker on the node.", workerEnvironment(created, created.worker_token));
+      }
+      await loadWorkers();
+    },
+  });
+}
+
+async function workerAction(action, id) {
+  const worker = state.workers.find((item) => item.worker_id === id);
+  if (!worker) return;
+  if (action === "edit") return workerForm(worker);
+  if (action === "drain") {
+    await api(`/v2/admin/workers/${id}/drain`, { method: "POST" });
+    toast("Worker is draining and will not receive new work");
+  } else if (action === "activate") {
+    await api(`/v2/admin/workers/${id}/activate`, { method: "POST" });
+    toast("Worker resumed");
+  } else if (action === "rotate") {
+    if (!confirm(`Rotate the token for ${worker.display_name}? The current token will stop working immediately.`)) return;
+    const rotated = await api(`/v2/admin/workers/${id}/rotate-token`, { method: "POST", body: { expires_at: null } });
+    showSecret("Save the new worker configuration", "Replace the node's current token and restart its container.", workerEnvironment(rotated, rotated.worker_token));
+  } else if (action === "revoke") {
+    if (!confirm(`Revoke ${worker.display_name}? It will immediately lose access to the worker API.`)) return;
+    await api(`/v2/admin/workers/${id}/revoke`, { method: "POST" });
+    toast("Worker access revoked");
+  } else if (action === "remove") {
+    if (!confirm(`Permanently remove ${worker.display_name} from the worker fleet? Historical job results remain available.`)) return;
+    await api(`/v2/admin/workers/${id}`, { method: "DELETE" });
+    toast("Worker removed");
+  }
+  await loadWorkers();
 }
 
 function providerCard(provider) {
@@ -545,6 +609,7 @@ $("#logout-button").addEventListener("click", async () => {
 $("#refresh-button").addEventListener("click", () => switchView(state.view));
 $("#menu-button").addEventListener("click", () => $("#sidebar").classList.toggle("open"));
 $("#add-provider-button").addEventListener("click", () => providerForm());
+$("#add-worker-button").addEventListener("click", () => workerForm());
 $("#add-client-button").addEventListener("click", clientForm);
 $("#add-webhook-button").addEventListener("click", webhookForm);
 $("#job-status-filter").addEventListener("change", loadJobs);
@@ -598,6 +663,12 @@ document.addEventListener("click", async (event) => {
   const providerButton = event.target.closest("[data-provider-action]");
   if (providerButton) {
     try { await providerAction(providerButton.dataset.providerAction, providerButton.dataset.id); }
+    catch (error) { toast(error.message, "error"); }
+    return;
+  }
+  const workerButton = event.target.closest("[data-worker-action]");
+  if (workerButton) {
+    try { await workerAction(workerButton.dataset.workerAction, workerButton.dataset.id); }
     catch (error) { toast(error.message, "error"); }
     return;
   }

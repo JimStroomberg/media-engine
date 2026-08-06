@@ -1,110 +1,129 @@
 # Standalone worker deployment
 
-Media Engine workers can run on separate hosts from the control plane. A worker polls for compatible stage leases,
-downloads source media and upstream artifacts directly from S3, processes them locally, uploads its outputs to S3, and
-reports completion through the worker API.
+Media Engine workers can run on separate hosts from the control plane. Each worker polls for compatible stage leases,
+downloads inputs through short-lived signed URLs, processes them locally, uploads outputs through short-lived signed
+URLs, and reports completion through the worker API.
 
 ```mermaid
 flowchart LR
-    worker["Worker node<br/>CPU or RK1"] -->|"HTTPS + bearer token<br/>register, claim, heartbeat, complete"| api["Media Engine API"]
-    worker <-->|"TLS + S3 credentials<br/>media and artifacts"| s3["S3-compatible storage"]
+    worker["Worker node<br/>CPU, RK1, Jetson, or another flavour"] -->|"HTTPS + individual worker token<br/>register, claim, heartbeat, complete"| api["Media Engine API"]
+    worker <-->|"Short-lived signed GET/PUT URLs<br/>no permanent S3 credentials"| s3["S3-compatible storage"]
     api --> postgres["PostgreSQL"]
-    api -->|"one claimed stage only"| worker
+    api --> s3
 ```
 
-The worker needs no PostgreSQL URL, administrator credentials, control-plane encryption key, webhook secrets, or provider
-API keys. When an AI-backed stage is claimed, the control plane sends that stage's provider connection over the trusted
-worker API and the worker discards it after the attempt.
+A standalone worker needs only:
+
+- Docker Engine with the Compose plugin;
+- outbound access to the worker API;
+- outbound access to the worker-facing S3/MinIO endpoint;
+- one individually revocable worker token.
+
+It receives no PostgreSQL URL, administrator credential, control-plane encryption key, webhook secret, or permanent S3
+credential. Provider-backed claims can contain the selected provider credential for that attempt, so the worker host is a
+trusted execution node and the worker API must use HTTPS or a trusted private network.
 
 ## Deployment choices
 
 | Deployment | Compose command | Use when |
 | --- | --- | --- |
-| All in one | `docker compose --env-file .env.local up -d --build` | One host should run the control plane and CPU worker |
-| Control plane only | `docker compose --env-file .env.local -f compose.yaml -f compose.control-plane.yaml up -d --build` | All workers run on other hosts |
-| Standalone CPU worker | `docker compose --env-file .env.worker -f compose.worker.yaml up -d` | Generic AMD64 or ARM64 worker |
-| Standalone RK1 worker | `docker compose --env-file .env.worker -f compose.worker-rk1.yaml up -d` | RK3588 worker with RKMPP devices |
-| All-in-one RK1 | `docker compose --env-file .env.local -f compose.yaml -f compose.local-rk1.yaml up -d --build` | Control plane and RK1 worker share one host |
-| Portainer all-in-one RK1 | Deploy `compose.portainer-rk1.yaml` as a Docker Standalone stack | Portainer must pull release images without a repository build context |
+| All in one | `docker compose --env-file .env.local up -d --build` | One host runs the control plane and CPU worker |
+| Control plane only | `docker compose --env-file .env.local -f compose.yaml -f compose.control-plane.yaml up -d --build` | All workers run elsewhere |
+| Standalone CPU | `docker compose --env-file .env.worker -f compose.worker.yaml up -d` | Generic AMD64 or ARM64 host |
+| Standalone RK1 | `docker compose --env-file .env.worker -f compose.worker-rk1.yaml up -d` | RK3588 with RKMPP devices |
+| All-in-one RK1 | `docker compose --env-file .env.local -f compose.yaml -f compose.local-rk1.yaml up -d --build` | Control plane and RK1 share one host |
+| Portainer RK1 | Deploy `compose.portainer-rk1.yaml` as a Docker Standalone stack | Portainer pulls published images |
 
-## Portainer all-in-one RK1
-
-`compose.portainer-rk1.yaml` is a self-contained stack for Portainer's web editor or stack API. It uses prebuilt images
-from `jimstro/media-engine`, preserves stack-local `./data` for the temporary legacy endpoints, and stores all v2 durable
-state in named PostgreSQL and MinIO volumes.
-
-Set the platform secrets from `.env.local` as Portainer stack environment variables. Also set:
-
-- `MEDIA_ENGINE_S3_PUBLIC_ENDPOINT_URL` to the browser- and client-reachable MinIO API URL;
-- `MEDIA_ENGINE_IMAGE` to an immutable generic tag such as `jimstro/media-engine:main-589fd0e`;
-- `MEDIA_ENGINE_RK1_IMAGE` to the matching immutable RK1 tag such as `jimstro/media-engine:rk1-main-589fd0e`;
-- `MEDIA_ENGINE_PORT`, `MINIO_API_PORT`, and `MINIO_CONSOLE_PORT` to unused host ports.
-
-The generic and RK1 image tags must come from the same commit. Portainer pulls both images on every stack update, while
-the immutable tags ensure that a deployment can be reproduced or rolled back exactly. Keep `pull_policy: always` so a
-new node does not silently reuse an incomplete local image.
+The all-in-one definitions import `MEDIA_ENGINE_LOCAL_WORKER_TOKEN` as the credential for their one bundled worker.
+Every separately deployed worker is created through the dashboard or management API and receives a different token.
+PostgreSQL remains authoritative after that initial enrolment: restarting the API does not undo a drain or revocation.
+If the bundled token is rotated in the dashboard, replace `MEDIA_ENGINE_LOCAL_WORKER_TOKEN` in the all-in-one environment
+before restarting; a stale value fails startup with an actionable error instead of restoring an old credential.
 
 ## Prepare the control plane
 
-1. Give workers a stable HTTPS or private-VPN URL for the Media Engine API. The reverse proxy must pass
-   `/v2/internal/*` to the API.
-2. Give workers a network-reachable TLS endpoint for the same S3 bucket used by the control plane.
-3. Copy the exact `MEDIA_ENGINE_WORKER_API_TOKEN` from the control-plane environment. Treat it as a secret: it authorizes
-   worker registration and stage claims.
-4. Choose the transcode routing policy in `.env.local`:
-   - `MEDIA_ENGINE_TRANSCODE_REQUIRED_BACKEND=cpu` allows only CPU workers to claim new transcodes;
-   - `MEDIA_ENGINE_TRANSCODE_REQUIRED_BACKEND=rkmpp` requires an RKMPP worker;
-   - `MEDIA_ENGINE_TRANSCODE_REQUIRED_BACKEND=` allows either compatible backend.
-5. If the central host should not process work, start it with the `compose.control-plane.yaml` overlay.
+Before adding remote workers, configure two reachable addresses:
 
-The worker API can carry a provider credential for a claimed stage. Never expose it over plain HTTP across an untrusted
-network. Prefer a private VPN; otherwise use HTTPS and restrict the route by firewall or reverse-proxy policy. Workers
-need outbound connectivity only and expose no ports.
+```dotenv
+# Worker API route. It may be a private VPN/LAN address or a restricted HTTPS hostname.
+MEDIA_ENGINE_WORKER_ADVERTISED_API_URL=https://workers.media.example.com
+
+# S3/MinIO address reachable from worker hosts. Signed URLs use this exact hostname.
+MEDIA_ENGINE_S3_WORKER_ENDPOINT_URL=https://s3.media.example.com
+```
+
+`MEDIA_ENGINE_S3_ENDPOINT_URL` remains the control plane's internal S3 address. `MEDIA_ENGINE_S3_PUBLIC_ENDPOINT_URL`
+is used for client artifact downloads. `MEDIA_ENGINE_S3_WORKER_ENDPOINT_URL` is specifically for worker stage transfers.
+They may all be the same URL, but separate values keep Docker-internal, client-facing, and worker-facing routing correct.
+
+The public API NGINX example intentionally returns `404` for `/v2/internal/*`. Prefer a private VPN or LAN route. If that
+is unavailable, adapt `deploy/nginx/media-engine-worker.conf.example`, allow only trusted worker egress addresses, and
+use a publicly trusted TLS certificate. Workers expose no inbound ports.
+
+Choose the transcode routing policy on the control plane:
+
+- `MEDIA_ENGINE_TRANSCODE_REQUIRED_BACKEND=cpu` requires a CPU worker;
+- `MEDIA_ENGINE_TRANSCODE_REQUIRED_BACKEND=rkmpp` requires an RKMPP worker;
+- an empty value allows any worker satisfying the rest of the stage contract.
+
+## Create a worker identity
+
+1. Sign in to `/admin`.
+2. Open **Workers** and select **Add worker**.
+3. Enter a descriptive name and a packaging profile such as `cpu`, `rk1`, `jetson`, `intel-qsv`, or `amd-vaapi`.
+4. Optionally set an expiry for temporary capacity.
+5. Save the generated environment block immediately. The `mew_...` token is returned only once; PostgreSQL stores only
+   its hash.
+
+The token determines the worker identity. A container cannot choose another worker ID, rename itself, or impersonate a
+different node. Display names and lifecycle state remain administrator-owned.
 
 ## Deploy a CPU worker
 
-On the worker host:
+On a generic AMD64 or ARM64 worker host:
 
 ```bash
 cp .env.worker.example .env.worker
 chmod 600 .env.worker
 ```
 
-Fill these values:
+Replace the example URL and token with the values generated by the dashboard. Pin an immutable release image:
 
-- `MEDIA_ENGINE_WORKER_API_URL`: control-plane URL, without a trailing `/v2` path;
-- `MEDIA_ENGINE_WORKER_API_TOKEN`: the control-plane worker token;
-- `MEDIA_ENGINE_WORKER_KEY`: a stable identifier unique across the entire Media Engine installation;
-- `MEDIA_ENGINE_WORKER_DISPLAY_NAME`: the operator-friendly dashboard name;
-- the `MEDIA_ENGINE_S3_*` values for the shared bucket.
+```dotenv
+MEDIA_ENGINE_WORKER_API_URL=https://workers.media.example.com
+MEDIA_ENGINE_WORKER_TOKEN=mew_replace_with_the_one_time_token
+MEDIA_ENGINE_WORKER_IMAGE=jimstro/media-engine:0.3.0
+```
 
-Validate and start it:
+Validate and start the one-container stack:
 
 ```bash
 docker compose --env-file .env.worker -f compose.worker.yaml config
+docker compose --env-file .env.worker -f compose.worker.yaml pull
 docker compose --env-file .env.worker -f compose.worker.yaml up -d
 docker compose --env-file .env.worker -f compose.worker.yaml logs -f worker
 ```
 
-For a release deployment, pin `MEDIA_ENGINE_WORKER_IMAGE` to an immutable version such as
-`jimstro/media-engine:0.2.2`. Leaving it empty uses `jimstro/media-engine:latest`.
+The CPU definition opens no ports, drops Linux capabilities, enables `no-new-privileges`, and uses a named volume only
+for scratch data. Durable media remains in S3.
 
 ## Deploy an RK1 worker
 
-Use the same small environment file, but start the RK1 definition:
+Use the same generated `.env.worker`, but select the RK1 image and Compose file:
+
+```dotenv
+MEDIA_ENGINE_WORKER_IMAGE=jimstro/media-engine:rk1-0.3.0
+```
 
 ```bash
 docker compose --env-file .env.worker -f compose.worker-rk1.yaml config
+docker compose --env-file .env.worker -f compose.worker-rk1.yaml pull
 docker compose --env-file .env.worker -f compose.worker-rk1.yaml up -d
 docker compose --env-file .env.worker -f compose.worker-rk1.yaml logs -f worker
 ```
 
-The RK1 file defaults to `jimstro/media-engine:rk1-latest`; pin releases as
-`jimstro/media-engine:rk1-0.2.2`. It exposes the RK3588 DRM, MPP, RGA, and DMA-heap devices and deliberately fails its
-startup self-test when RKMPP is unavailable. The image uses Ubuntu 24.04 because the Rockchip multimedia packages are not
-published for Ubuntu 26.04.
-
-Before starting it, confirm the host provides:
+The RK1 definition exposes the RK3588 DRM, MPP, RGA, and DMA-heap devices and fails its startup self-test when RKMPP is
+unavailable. Confirm these host paths exist before deployment:
 
 ```text
 /dev/dri
@@ -113,93 +132,103 @@ Before starting it, confirm the host provides:
 /dev/dma_heap
 ```
 
-The library mounts in `compose.worker-rk1.yaml` match the Ubuntu paths used on the supported RK1 installation. Adjust them
-only when the host packages place those libraries elsewhere.
+The image uses Ubuntu 24.04 because the Rockchip multimedia packages are not published for Ubuntu 26.04. This exception
+is isolated to the worker image; the worker protocol and control plane remain hardware-neutral.
 
-## S3 permissions
+## Portainer worker-only stack
 
-Workers need bucket metadata access plus read/write access to content-addressed objects. They do not delete retained
-objects; deletion belongs to the control-plane scheduler. For AWS-style policies, a worker credential can use a policy
-like this after replacing the bucket name:
+1. Create the worker in the Media Engine dashboard and keep the generated token open.
+2. In Portainer, select **Stacks → Add stack**.
+3. Paste `compose.worker.yaml` for a CPU node or `compose.worker-rk1.yaml` for an RK1.
+4. Add the generated values as stack environment variables.
+5. Deploy the stack and inspect the `worker` container logs.
+6. Return to Media Engine and confirm the node becomes online.
 
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": [
-        "s3:GetBucketLocation",
-        "s3:ListBucket",
-        "s3:ListBucketMultipartUploads"
-      ],
-      "Resource": "arn:aws:s3:::media-engine"
-    },
-    {
-      "Effect": "Allow",
-      "Action": [
-        "s3:GetObject",
-        "s3:PutObject",
-        "s3:AbortMultipartUpload",
-        "s3:ListMultipartUploadParts"
-      ],
-      "Resource": "arn:aws:s3:::media-engine/blobs/sha256/*"
-    }
-  ]
-}
-```
+Use a Portainer secret or restricted environment variable for `MEDIA_ENGINE_WORKER_TOKEN` when the installation supports
+it. The worker also supports `MEDIA_ENGINE_WORKER_TOKEN_FILE`; a custom Compose override can mount a secret read-only and
+point this setting at `/run/secrets/media_engine_worker_token`.
 
-Use `MEDIA_ENGINE_S3_FORCE_PATH_STYLE=true` for MinIO. Use `false` for ordinary AWS virtual-hosted bucket addressing.
-When the worker runs with an AWS instance or task role, the access-key fields may remain empty.
+## Verify attachment
+
+A ready node logs `Worker authenticated and registered`. In **Dashboard → Workers**, confirm:
+
+- the expected name is online;
+- hostname, architecture, worker version, profile, backend, processors, encoders, and providers are visible;
+- the token's last-used timestamp changes;
+- a compatible job shows an active lease on that worker;
+- output artifacts become available after the signed upload completes.
+
+Registration does not make the container authoritative about its identity. The API derives identity from the token and
+only accepts capabilities and runtime facts from the authenticated node.
+
+## Drain, resume, rotate, revoke, and remove
+
+- **Drain** prevents new claims. An existing lease may heartbeat and finish normally.
+- **Resume** allows claims again after draining.
+- **Rotate token** invalidates the old token immediately and displays a replacement once. Update `.env.worker` and
+  recreate the container. For an all-in-one bundled worker, update `MEDIA_ENGINE_LOCAL_WORKER_TOKEN` because that one
+  value is supplied to both the API enrolment and worker service.
+- **Revoke** immediately rejects registration, claims, heartbeats, completion, and failure reports. Use this for a lost
+  or retired host. Rotating its token creates a fresh credential and reactivates the worker.
+- **Remove** appears after revocation. It removes the node from fleet views and erases its credential material while
+  retaining a small audit record so completed jobs can still show which worker ran them. A worker with an active lease
+  cannot be removed. A bundled all-in-one worker must first be removed from the deployment configuration.
+
+Before planned maintenance, drain the node and wait until its active lease disappears. If a process stops unexpectedly,
+the lease expires and the scheduler safely requeues the stage up to its attempt limit.
 
 ## Multiple workers
 
-Run the worker Compose project on every node with its own `.env.worker`. Each `MEDIA_ENGINE_WORKER_KEY` must be unique and
-stable across container recreation. Reusing one key makes two processes appear as one worker and can corrupt lease
-ownership.
-
-Do not use `docker compose up --scale worker=N` with one environment file because every replica would share the same key.
-To run multiple workers on one machine, use separate environment files, unique keys, and unique Compose project names:
+Create one dashboard identity and one `.env.worker` file per running worker process. Do not copy one token across nodes or
+use `docker compose up --scale worker=N` with a shared environment file. To run two processes on one host, use distinct
+tokens and Compose project names:
 
 ```bash
 docker compose -p media-worker-01 --env-file .env.worker-01 -f compose.worker.yaml up -d
 docker compose -p media-worker-02 --env-file .env.worker-02 -f compose.worker.yaml up -d
 ```
 
-## Verify attachment
+Each worker currently claims one stage at a time. Adding workers increases parallelism without changing the control
+plane, PostgreSQL, or S3 deployment.
 
-A ready worker logs `Worker registered and S3 access verified`. In the management dashboard:
+## Add another hardware flavour
 
-1. open **Workers**;
-2. confirm the expected display name is **online**;
-3. inspect its backend, processors, and provider adapters;
-4. submit a compatible job and confirm the active lease appears on that worker.
+A flavour is packaging plus capability reporting, not a new API protocol. A Jetson, Intel Quick Sync, or AMD VA-API
+worker should reuse `python -m app.worker` and change only:
 
-The worker retries while either the API or S3 is unavailable. It does not advertise itself as ready until both connections
-work.
+- its container image and required runtime libraries;
+- device, library, and security mounts in its Compose file;
+- `MEDIA_ENGINE_WORKER_BACKEND` and `MEDIA_ENGINE_WORKER_PROFILE`;
+- its startup self-test and advertised processors, encoders, or accelerators.
 
-## Upgrades and recovery
+Pipeline stages declare required capabilities and the scheduler matches them against the worker's advertised
+capabilities. Do not add hardware-name branches to the control plane when a capability can express the requirement.
 
-Before upgrading, check the dashboard for an active lease. Change the pinned image tag, then run:
+## Upgrade or replace a worker
+
+1. Drain the worker in the dashboard.
+2. Wait for its active lease to finish.
+3. Change `MEDIA_ENGINE_WORKER_IMAGE` to the new immutable tag.
+4. Pull and recreate the service.
+5. Resume the worker and run a representative job.
 
 ```bash
 docker compose --env-file .env.worker -f compose.worker.yaml pull
 docker compose --env-file .env.worker -f compose.worker.yaml up -d
 ```
 
-Use the RK1 filename for an RK1 node. If a worker stops during a stage, the lease expires and the scheduler safely requeues
-the stage up to its attempt limit. The worker's named volume contains scratch data only; durable media remains in S3.
+Use the RK1 filename for an RK1. Replacing the container does not require a new identity or token. Rotate the token only
+when its confidentiality is uncertain or an operator intentionally wants a fresh credential.
 
 ## Troubleshooting
 
 | Symptom | Check |
 | --- | --- |
-| Repeated `401 Unauthorized` | Worker and control plane must have the exact same `MEDIA_ENGINE_WORKER_API_TOKEN` |
-| Repeated readiness failures | API URL, TLS trust, S3 endpoint, bucket name, credentials, and path-style setting |
-| Worker is online but never claims transcodes | `MEDIA_ENGINE_TRANSCODE_REQUIRED_BACKEND` and the worker's `cpu`/`rkmpp` backend |
-| AI stage remains queued | The selected provider must be enabled and the worker must report that provider adapter |
-| RK1 startup self-test fails | Required device nodes, library mounts, and the Rockchip FFmpeg build |
-| Worker appears twice after replacement | Reuse the original key for the replacement and stop the old process |
-
-The first worker protocol uses one shared bootstrap token. Rotating it requires updating the control plane and every worker.
-Individually revocable worker credentials are planned before the worker trust model is considered stable.
+| Repeated `401 Unauthorized` | Token is complete, not expired/revoked, and belongs to this worker |
+| Registration retries | Worker API URL, TLS trust, NGINX route, firewall, and dashboard desired state |
+| Signed download/upload fails | `MEDIA_ENGINE_S3_WORKER_ENDPOINT_URL`, DNS, TLS, S3 path style, and reverse-proxy request preservation |
+| Worker is online but claims nothing | Desired state, stage requirements, backend routing policy, and advertised capabilities |
+| AI stage remains queued | Selected provider is enabled and the worker advertises the provider adapter |
+| RK1 startup self-test fails | Device nodes, library mounts, permissions, and Rockchip FFmpeg build |
+| Rotated worker remains unauthorized | Replace the entire token in `.env.worker`, then recreate the container |
+| Worker is offline after creation | A created identity stays offline until its first authenticated registration |

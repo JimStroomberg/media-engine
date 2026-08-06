@@ -45,11 +45,27 @@ class GeneratedApiKey:
     token_hash: str
 
 
+@dataclass(frozen=True)
+class GeneratedWorkerToken:
+    token: str
+    prefix: str
+    token_hash: str
+
+
 def generate_api_key() -> GeneratedApiKey:
     prefix = secrets.token_hex(6)
     secret = secrets.token_urlsafe(32)
     token = f"me_{prefix}_{secret}"
     return GeneratedApiKey(token=token, prefix=prefix, token_hash=hash_api_key(token))
+
+
+def generate_worker_token() -> GeneratedWorkerToken:
+    """Return a one-time worker credential suitable for hashed persistence."""
+
+    prefix = secrets.token_hex(6)
+    secret = secrets.token_urlsafe(32)
+    token = f"mew_{prefix}_{secret}"
+    return GeneratedWorkerToken(token=token, prefix=prefix, token_hash=hash_api_key(token))
 
 
 def generate_webhook_signing_secret() -> str:

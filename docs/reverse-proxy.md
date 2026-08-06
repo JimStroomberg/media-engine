@@ -29,11 +29,15 @@ Once both public hostnames are reachable, configure the control plane:
 
 ```dotenv
 MEDIA_ENGINE_S3_PUBLIC_ENDPOINT_URL=https://s3.media.example.com
+MEDIA_ENGINE_S3_WORKER_ENDPOINT_URL=https://s3.media.example.com
+MEDIA_ENGINE_WORKER_ADVERTISED_API_URL=https://workers.media.example.com
 MEDIA_ENGINE_ADMIN_SESSION_COOKIE_SECURE=true
 ```
 
-`MEDIA_ENGINE_S3_ENDPOINT_URL` remains the internal S3 endpoint used by the API and workers. Only
-`MEDIA_ENGINE_S3_PUBLIC_ENDPOINT_URL` is used to construct client-facing signed download URLs.
+`MEDIA_ENGINE_S3_ENDPOINT_URL` remains the internal S3 endpoint used by the control plane.
+`MEDIA_ENGINE_S3_PUBLIC_ENDPOINT_URL` constructs client-facing signed artifact URLs, while
+`MEDIA_ENGINE_S3_WORKER_ENDPOINT_URL` constructs signed stage download and upload URLs. They may point at the same S3
+hostname when it is reachable by both clients and workers.
 
 The public API example returns `404` for `/v2/internal/*`. An all-in-one worker continues to use the private Docker
 network. Standalone workers must use a private VPN/LAN route or the restricted worker hostname. Never expose the worker
@@ -227,8 +231,9 @@ Networks that run Media Engine products locally can use split-horizon DNS:
 - local DNS resolves the same hostnames to the reverse proxy's private address.
 
 The HTTPS hostname and certificate remain identical, while local uploads and signed-artifact downloads stay on the LAN.
-This is preferable to giving products a separate private URL because `MEDIA_ENGINE_S3_PUBLIC_ENDPOINT_URL` works both
-inside and outside the network.
+This is preferable to giving products a separate private URL because `MEDIA_ENGINE_S3_PUBLIC_ENDPOINT_URL` and
+`MEDIA_ENGINE_S3_WORKER_ENDPOINT_URL` can retain one certificate hostname while split DNS keeps local transfers on the
+LAN.
 
 ## Cloudflare
 

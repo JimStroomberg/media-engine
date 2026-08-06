@@ -9,7 +9,8 @@ The dashboard currently provides:
 
 - an operational overview of jobs, active stages, workers, provider state, usage, and webhook failures;
 - filterable job history with stage attempts, worker assignments, artifacts, errors, provider usage, and webhook state;
-- worker online/offline state, last heartbeat, capabilities, and current lease;
+- worker creation, one-time token generation, rename, drain/resume, rotation, revocation, runtime facts, capabilities,
+  heartbeat, and current lease;
 - OpenAI and xAI provider creation, editing, credential verification, enable/disable, default selection, and removal;
 - client-project creation and scoped API-key generation or revocation;
 - webhook endpoint creation, default selection, test delivery, signing-secret rotation, and delivery history;
@@ -33,9 +34,20 @@ helper creates `MEDIA_ENGINE_ADMIN_SESSION_SECRET` automatically without replaci
 docker compose --env-file .env.local up -d --build
 ```
 
-New API keys and webhook signing secrets appear once. Copy them into the consuming product before closing the notice.
-Media Engine stores only an API-key hash and stores webhook/provider credentials encrypted, so it cannot reveal those
-plaintext values later.
+New API keys, worker tokens, and webhook signing secrets appear once. Copy them into the consuming deployment before
+closing the notice. Media Engine stores API-key and worker-token hashes and stores webhook/provider credentials
+encrypted, so it cannot reveal those plaintext values later.
+
+## Worker management
+
+Create workers before starting their containers. The dashboard returns a copy-ready `.env.worker` block containing the
+worker-facing API URL, individual token, and image appropriate for the selected profile. Set
+`MEDIA_ENGINE_WORKER_ADVERTISED_API_URL` on the control plane when workers use a different hostname than the dashboard.
+
+Draining prevents new claims without interrupting an active lease. Resume returns the worker to scheduling. Rotation
+invalidates the old token immediately and returns a replacement once; revocation disables the identity completely. A
+revoked worker can be re-enrolled by rotating its token or removed from fleet views. Removal erases its remaining
+credential material but preserves a minimal audit record for historical job attribution.
 
 ## Production deployment
 

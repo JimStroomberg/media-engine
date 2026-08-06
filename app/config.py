@@ -15,6 +15,7 @@ class Settings(BaseSettings):
         env_file=(".env", ".env.local"),
         env_file_encoding="utf-8",
         extra="ignore",
+        populate_by_name=True,
     )
 
     app_name: str = Field("media-engine", description="Service identifier")
@@ -57,6 +58,10 @@ class Settings(BaseSettings):
     database_url: str | None = Field(None, description="Async SQLAlchemy URL for the platform PostgreSQL database")
     s3_endpoint_url: str | None = Field(None, description="Optional S3-compatible endpoint such as MinIO")
     s3_public_endpoint_url: str | None = Field(None, description="Client-reachable endpoint used for signed S3 URLs")
+    s3_worker_endpoint_url: str | None = Field(
+        None,
+        description="Worker-reachable endpoint used for signed S3 transfer URLs",
+    )
     s3_access_key_id: str | None = Field(
         None,
         description="S3 access key; omit when the SDK credential chain is used",
@@ -74,11 +79,32 @@ class Settings(BaseSettings):
     retention_interval_seconds: int = Field(60, ge=5, description="Delay between expired-blob sweeps")
     retention_batch_size: int = Field(100, ge=1, le=1000, description="Maximum blobs handled in one retention sweep")
 
-    worker_api_token: str | None = Field(None, description="Bearer token accepted by internal worker endpoints")
+    worker_token: str | None = Field(
+        None,
+        validation_alias=AliasChoices("MEDIA_ENGINE_WORKER_TOKEN", "MEDIA_ENGINE_WORKER_API_TOKEN"),
+        description="Per-worker bearer token; the old worker API token name is accepted by worker processes only",
+    )
+    worker_token_file: Path | None = Field(
+        None,
+        description="Optional file containing the per-worker bearer token",
+    )
     worker_api_url: str = Field("http://api:8080", description="Control-plane base URL used by worker processes")
-    worker_key: str = Field("worker-cpu-1", description="Stable worker identity within a deployment")
-    worker_display_name: str = Field("CPU worker", description="Human-readable worker name")
+    worker_advertised_api_url: str | None = Field(
+        None,
+        description="Worker-facing HTTPS URL shown in generated deployment configuration",
+    )
     worker_backend: str = Field("cpu", description="Worker hardware backend capability")
+    worker_profile: str = Field("cpu", description="Packaging profile reported by the worker runtime")
+    initial_worker_token: str | None = Field(
+        None,
+        description="Optional per-worker token imported for the bundled Compose worker",
+    )
+    initial_worker_key: str = Field("worker-cpu-1", description="Stable key for the bundled Compose worker")
+    initial_worker_display_name: str = Field(
+        "Compose CPU worker",
+        description="Dashboard name for the bundled Compose worker",
+    )
+    initial_worker_profile: str = Field("cpu", description="Packaging profile for the bundled Compose worker")
     transcode_required_backend: str | None = Field(
         None,
         description="Optional backend capability required for newly queued transcode stages",
@@ -148,6 +174,16 @@ class Settings(BaseSettings):
 
         return bool(self.database_url and self.s3_bucket)
 
+    def resolved_worker_token(self) -> str | None:
+        """Read the worker token from direct configuration or a mounted secret file."""
+
+        if self.worker_token:
+            return self.worker_token.strip()
+        if self.worker_token_file:
+            token = self.worker_token_file.read_text(encoding="utf-8").strip()
+            return token or None
+        return None
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
@@ -173,7 +209,6 @@ def validate_control_plane_configuration(settings: Settings) -> None:
         "MEDIA_ENGINE_ADMIN_PASSWORD": settings.admin_password,
         "MEDIA_ENGINE_ADMIN_SESSION_SECRET": settings.admin_session_secret,
         "MEDIA_ENGINE_CREDENTIAL_ENCRYPTION_KEY": settings.credential_encryption_key,
-        "MEDIA_ENGINE_WORKER_API_TOKEN": settings.worker_api_token,
     }
     missing = []
     for name, value in required.items():

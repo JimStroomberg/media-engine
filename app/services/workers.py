@@ -46,8 +46,6 @@ class ArtifactCompletion:
     sha256: str
     size_bytes: int
     media_type: str | None
-    object_key: str
-    etag: str | None
     artifact_type: str
     format: str
     schema_version: str
@@ -64,6 +62,15 @@ class UsageCompletion:
     latency_ms: int
     started_at: datetime
     completed_at: datetime
+
+
+@dataclass(frozen=True)
+class PreparedArtifactUpload:
+    object_key: str
+    upload_required: bool
+    upload_url: str | None
+    headers: dict[str, str]
+    expires_at: datetime
 
 
 def capabilities_satisfy(actual: dict[str, Any], required: dict[str, Any]) -> bool:
@@ -87,38 +94,21 @@ class WorkerService:
         self,
         session: AsyncSession,
         *,
-        worker_key: str,
-        display_name: str,
+        worker_id: uuid.UUID,
         capabilities: dict[str, Any],
+        runtime: dict[str, Any],
     ) -> Worker:
         now = datetime.now(UTC)
-        statement = (
-            insert(Worker)
-            .values(
-                id=uuid.uuid4(),
-                worker_key=worker_key,
-                display_name=display_name,
-                capabilities=capabilities,
-                status="online",
-                last_seen_at=now,
-            )
-            .on_conflict_do_update(
-                index_elements=[Worker.worker_key],
-                set_={
-                    "display_name": display_name,
-                    "capabilities": capabilities,
-                    "status": "online",
-                    "last_seen_at": now,
-                    "updated_at": now,
-                },
-            )
-            .returning(Worker.id)
-        )
-        worker_id = (await session.execute(statement)).scalar_one()
-        await session.commit()
-        worker = await session.get(Worker, worker_id)
+        worker = await session.scalar(select(Worker).where(Worker.id == worker_id).with_for_update())
         if worker is None:
-            raise RuntimeError("Worker disappeared after registration")
+            raise WorkerNotFound(f"Worker {worker_id} was not found")
+        worker.capabilities = capabilities
+        worker.runtime = runtime
+        worker.status = "online"
+        worker.registered_at = worker.registered_at or now
+        worker.last_seen_at = now
+        await session.commit()
+        await session.refresh(worker)
         return worker
 
     async def claim(self, session: AsyncSession, *, worker_id: uuid.UUID) -> StageRun | None:
@@ -126,6 +116,10 @@ class WorkerService:
         worker = await session.scalar(select(Worker).where(Worker.id == worker_id).with_for_update())
         if worker is None:
             raise WorkerNotFound(f"Worker {worker_id} was not found")
+        if worker.desired_state != "active":
+            worker.last_seen_at = now
+            await session.commit()
+            return None
         worker.status = "online"
         worker.last_seen_at = now
 
@@ -237,13 +231,16 @@ class WorkerService:
 
         for artifact in sorted(artifacts, key=lambda item: item.sha256):
             expected_key = content_addressed_key(artifact.sha256)
-            if artifact.object_key != expected_key:
-                raise ArtifactRejected("Reported artifact is not available at its content-addressed S3 key")
 
             # Retention takes the same lock before deleting an existing object.
             await session.scalar(select(Blob).where(Blob.sha256 == artifact.sha256).with_for_update())
-            if not await self.store.exists(artifact.object_key):
+            stored_object = await self.store.stat(expected_key)
+            if stored_object is None:
                 raise ArtifactRejected("Reported artifact is not available at its content-addressed S3 key")
+            if stored_object.size_bytes != artifact.size_bytes:
+                raise ArtifactRejected("Stored artifact size does not match the completion report")
+            if stored_object.metadata.get("sha256") != artifact.sha256:
+                raise ArtifactRejected("Stored artifact SHA-256 metadata does not match the completion report")
 
             blob_statement = (
                 insert(Blob)
@@ -253,8 +250,8 @@ class WorkerService:
                     size_bytes=artifact.size_bytes,
                     media_type=artifact.media_type,
                     bucket=self.store.bucket,
-                    object_key=artifact.object_key,
-                    etag=artifact.etag,
+                    object_key=expected_key,
+                    etag=stored_object.etag,
                     state="available",
                     expires_at=expires_at,
                     expired_at=None,
@@ -265,8 +262,8 @@ class WorkerService:
                         "size_bytes": artifact.size_bytes,
                         "media_type": artifact.media_type,
                         "bucket": self.store.bucket,
-                        "object_key": artifact.object_key,
-                        "etag": artifact.etag,
+                        "object_key": expected_key,
+                        "etag": stored_object.etag,
                         "state": "available",
                         "expires_at": func.greatest(Blob.expires_at, expires_at),
                         "expired_at": None,
@@ -393,6 +390,60 @@ class WorkerService:
         if failed is None:
             raise RuntimeError("Stage disappeared after failure handling")
         return failed
+
+    async def prepare_artifact_upload(
+        self,
+        session: AsyncSession,
+        *,
+        worker_id: uuid.UUID,
+        stage_id: uuid.UUID,
+        lease_token: uuid.UUID,
+        sha256: str,
+        size_bytes: int,
+        media_type: str | None,
+        artifact_type: str,
+        schema_version: str,
+    ) -> PreparedArtifactUpload:
+        now = datetime.now(UTC)
+        stage = await self.get_stage(session, stage_id)
+        if stage is None:
+            raise LeaseLost(f"Stage {stage_id} was not found")
+        self._validate_active_lease(stage, worker_id=worker_id, lease_token=lease_token, now=now)
+        pipeline = get_pipeline(stage.pipeline_run.pipeline_name, stage.pipeline_run.pipeline_version)
+        definition = pipeline.stage(stage.stage_name)
+        contracts = {output.artifact_type: output for output in definition.outputs}
+        contract = contracts.get(artifact_type)
+        if contract is None or contract.schema_version != schema_version:
+            raise ArtifactRejected("Requested upload does not match the stage output contract")
+
+        object_key = content_addressed_key(sha256)
+        existing = await self.store.stat(object_key)
+        expires_at = now + timedelta(seconds=self.settings.artifact_url_expiry_seconds)
+        if existing is not None:
+            if existing.size_bytes != size_bytes or existing.metadata.get("sha256") != sha256:
+                raise ArtifactRejected("Existing content-addressed object does not match the requested artifact")
+            return PreparedArtifactUpload(
+                object_key=object_key,
+                upload_required=False,
+                upload_url=None,
+                headers={},
+                expires_at=expires_at,
+            )
+
+        upload_url, headers = self.store.create_upload_url(
+            object_key,
+            expires_in=self.settings.artifact_url_expiry_seconds,
+            sha256=sha256,
+            size_bytes=size_bytes,
+            media_type=media_type,
+        )
+        return PreparedArtifactUpload(
+            object_key=object_key,
+            upload_required=True,
+            upload_url=upload_url,
+            headers=headers,
+            expires_at=expires_at,
+        )
 
     async def get_stage(self, session: AsyncSession, stage_id: uuid.UUID) -> StageRun | None:
         return await session.scalar(

@@ -21,6 +21,7 @@ from .persistence.database import check_database, close_database, configure_data
 from .security import CredentialCipher
 from .selftest import SelfTestFailure, run_self_tests
 from .services.providers import ProviderConfigurationService
+from .services.worker_access import WorkerAccessService
 from .storage.s3 import S3Store
 from .transcode.engine import TranscodeEngine
 from .utils.callbacks import CallbackDispatcher
@@ -54,6 +55,14 @@ async def lifespan(app: FastAPI):
                 settings,
                 app.state.credential_cipher,
             ).import_environment(session)
+            if settings.initial_worker_token:
+                await WorkerAccessService().import_initial(
+                    session,
+                    worker_key=settings.initial_worker_key,
+                    display_name=settings.initial_worker_display_name,
+                    profile=settings.initial_worker_profile,
+                    token=settings.initial_worker_token,
+                )
         app.state.s3_store = S3Store(settings)
         await app.state.s3_store.check_bucket()
         logger.info("Platform v2 PostgreSQL and S3 dependencies are ready")
