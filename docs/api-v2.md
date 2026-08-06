@@ -114,7 +114,15 @@ endpoint is created or its secret is rotated.
 
 ### `transcode` version 1
 
-One durable stage producing `transcoded_media`. Options are `quality` and `codec`.
+One durable stage producing `transcoded_media`. Options are `quality` and `codec`. This version remains addressable for
+older clients and uses the balanced compression envelope.
+
+### `transcode` version 2 (latest)
+
+Version 2 adds `quality_profile` with `compact`, `balanced` (default), and `high` values. It also adds `low_360p` and
+`qhd_1440p` resolution targets alongside 480p, 720p, 1080p, and 2160p. Resolution and compression are deliberately
+separate options. Exact rate-control tables, backend mappings, API examples, and hardware benchmark evidence are in
+[transcode-quality.md](transcode-quality.md).
 
 ### `ai_prepare` version 1
 

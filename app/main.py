@@ -16,7 +16,7 @@ from .api.observability import router as observability_router
 from .api.v2 import router as v2_router
 from .config import Settings, ensure_runtime_directories, get_settings, validate_control_plane_configuration
 from .jobs import JobManager, QueueFullError, UploadTooLargeError
-from .models import CodecPreference, JobDetail, JobListResponse, JobRequest, JobResponse, QualityTarget
+from .models import CodecPreference, EncodingQuality, JobDetail, JobListResponse, JobRequest, JobResponse, QualityTarget
 from .persistence.database import check_database, close_database, configure_database, get_session_factory
 from .security import CredentialCipher
 from .selftest import SelfTestFailure, run_self_tests
@@ -45,9 +45,7 @@ async def lifespan(app: FastAPI):
             raise RuntimeError("Platform v2 is enabled without MEDIA_ENGINE_DATABASE_URL")
         if settings.credential_encryption_key is None:
             raise RuntimeError("MEDIA_ENGINE_CREDENTIAL_ENCRYPTION_KEY is required")
-        app.state.credential_cipher = CredentialCipher(
-            settings.credential_encryption_key.get_secret_value()
-        )
+        app.state.credential_cipher = CredentialCipher(settings.credential_encryption_key.get_secret_value())
         configure_database(settings.database_url)
         await check_database()
         async with get_session_factory()() as session:
@@ -168,10 +166,16 @@ async def submit_job(
     file: UploadFile = File(..., description="Video file to transcode"),
     quality: QualityTarget = Form(QualityTarget.auto),
     codec: CodecPreference = Form(CodecPreference.auto),
+    quality_profile: EncodingQuality = Form(EncodingQuality.balanced),
     callback_url: str | None = Form(None),
     job_manager: JobManager = Depends(get_job_manager),
 ) -> JobResponse:
-    job_request = JobRequest(quality=quality, codec=codec, callback_url=callback_url)
+    job_request = JobRequest(
+        quality=quality,
+        codec=codec,
+        quality_profile=quality_profile,
+        callback_url=callback_url,
+    )
     try:
         return await job_manager.submit_job(file, job_request)
     except QueueFullError as exc:

@@ -8,11 +8,11 @@ import pytest
 
 from app import hardware
 from app.config import Settings
-from app.models import CodecPreference, JobStatus, QualityTarget
+from app.models import CodecPreference, EncodingQuality, JobStatus, QualityTarget
 from app.transcode import engine as engine_module
 from app.transcode.engine import MediaCommandTimeout, TranscodeEngine, UnsupportedInputCodec
 from app.transcode.probe import MediaInfo, MediaStreamInfo
-from app.transcode.profiles import PROFILES
+from app.transcode.profiles import PROFILES, resolve_rate_control
 
 
 def jetson_settings() -> Settings:
@@ -190,6 +190,11 @@ def test_jetson_pipeline_converts_compositor_rgba_output_for_nvenc(monkeypatch, 
         source,
         destination,
         PROFILES[QualityTarget.sd_480p],
+        resolve_rate_control(
+            PROFILES[QualityTarget.sd_480p],
+            CodecPreference.h265,
+            EncodingQuality.balanced,
+        ),
         CodecPreference.h265,
     )
 
@@ -199,8 +204,27 @@ def test_jetson_pipeline_converts_compositor_rgba_output_for_nvenc(monkeypatch, 
     nv12_index = command.index("video/x-raw(memory:NVMM),format=NV12,width=848,height=480")
     assert command[rgba_index + 2] == "nvvidconv"
     assert rgba_index < nv12_index < command.index("nvv4l2h265enc")
+    assert "interpolation-method=3" in command
+    assert "control-rate=0" in command
+    assert "bitrate=1250000" in command
+    assert "peak-bitrate=1800000" in command
     assert "hvc1" in captured["ffmpeg"]
     assert destination.read_bytes() == b"muxed"
+
+    transcode_engine._transcode_jetson(
+        record,
+        source,
+        destination,
+        PROFILES[QualityTarget.sd_480p],
+        resolve_rate_control(
+            PROFILES[QualityTarget.sd_480p],
+            CodecPreference.h264,
+            EncodingQuality.balanced,
+        ),
+        CodecPreference.h264,
+    )
+
+    assert "profile=4" in captured["gstreamer"]
 
 
 def test_gstreamer_hard_timeout_terminates_the_process(monkeypatch) -> None:

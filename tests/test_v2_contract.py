@@ -81,9 +81,28 @@ def test_foundation_tables_are_registered() -> None:
 def test_transcode_pipeline_is_server_versioned() -> None:
     pipeline = get_pipeline("transcode")
 
-    assert pipeline.version == "1"
+    assert pipeline.version == "2"
     assert pipeline.required_artifacts == ("transcoded_media",)
+    assert pipeline.normalize_options({}) == {
+        "quality": "auto",
+        "codec": "auto",
+        "quality_profile": "balanced",
+    }
+    transcode_v1 = get_pipeline("transcode", "1")
+    assert transcode_v1.normalize_options({}) == {"quality": "auto", "codec": "auto"}
+    with pytest.raises(ValidationError):
+        transcode_v1.normalize_options({"quality": "qhd_1440p"})
     assert [item.name for item in list_pipelines()] == ["ai_prepare", "transcode", "understand"]
+
+
+def test_legacy_transcode_form_advertises_quality_profile() -> None:
+    openapi = app.openapi()
+    request_schema = openapi["components"]["schemas"]["Body_submit_job_jobs_post"]
+
+    assert request_schema["properties"]["quality_profile"] == {
+        "$ref": "#/components/schemas/EncodingQuality",
+        "default": "balanced",
+    }
 
 
 def test_ai_prepare_pipeline_declares_a_durable_stage_graph() -> None:
@@ -220,9 +239,7 @@ def test_understand_v2_discovery_separates_dynamic_defaults_from_json_schema() -
         assert selection.effective_defaults.provider in selection.supported_providers
         assert selection.effective_defaults.provider == effective_options[selection.provider_option]
         assert selection.effective_defaults.model == effective_options[selection.model_option]
-        assert stage.effective_required_capabilities == {
-            "providers": [selection.effective_defaults.provider]
-        }
+        assert stage.effective_required_capabilities == {"providers": [selection.effective_defaults.provider]}
 
 
 async def test_understand_v2_runtime_discovery_uses_management_provider_defaults() -> None:

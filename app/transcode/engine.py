@@ -14,9 +14,9 @@ from pathlib import Path
 
 from ..config import get_settings
 from ..hardware import JETSON_DECODERS, gstreamer_feature_available, normalize_video_codec
-from ..models import CodecPreference, JobRequest, JobStatus, QualityTarget
+from ..models import CodecPreference, EncodingQuality, JobRequest, JobStatus, QualityTarget
 from ..transcode.probe import MediaInfo, ProbeError, probe_media
-from ..transcode.profiles import QualityProfile, choose_profile
+from ..transcode.profiles import QualityProfile, RateControl, choose_profile, resolve_rate_control
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +27,10 @@ class TranscodeResult:
     remuxed: bool
     profile: QualityProfile | None
     codec: CodecPreference
+    quality_profile: EncodingQuality | None = None
+    rate_control: RateControl | None = None
+    backend: str | None = None
+    encoder: str | None = None
 
 
 class TranscodeCancelled(RuntimeError):
@@ -95,6 +99,7 @@ class TranscodeEngine:
             )
         record.quality = profile.name
         target_codec = self._resolve_codec(info, profile, request)
+        rate_control = resolve_rate_control(profile, target_codec, request.quality_profile)
         logger.info(
             "Profile resolved",
             extra={
@@ -103,6 +108,10 @@ class TranscodeEngine:
                 "target_codec": target_codec.value,
                 "requested_quality": request.quality.value,
                 "requested_codec": request.codec.value,
+                "quality_profile": request.quality_profile.value,
+                "rate_control": rate_control.mode,
+                "average_bitrate": rate_control.average_bitrate,
+                "peak_bitrate": rate_control.peak_bitrate,
             },
         )
 
@@ -118,6 +127,8 @@ class TranscodeEngine:
             logger.info("Selected remux path", extra={"job_id": job_id})
             self._remux(record, source_path, work_output)
             remuxed = True
+            result_backend = None
+            result_encoder = "copy"
         else:
             self._validate_backend_input_codec(info)
             hardware_backend, decoder, encoder = self._select_hardware_codecs(info, target_codec)
@@ -138,9 +149,24 @@ class TranscodeEngine:
                 allow_cpu_fallback = self.settings.allow_cpu_fallback
                 try:
                     if hardware_backend == "rkmpp":
-                        self._transcode_rkmpp(record, source_path, work_output, profile, decoder, encoder)
+                        self._transcode_rkmpp(
+                            record,
+                            source_path,
+                            work_output,
+                            profile,
+                            rate_control,
+                            decoder,
+                            encoder,
+                        )
                     elif hardware_backend == "nvv4l2":
-                        self._transcode_jetson(record, source_path, work_output, profile, target_codec)
+                        self._transcode_jetson(
+                            record,
+                            source_path,
+                            work_output,
+                            profile,
+                            rate_control,
+                            target_codec,
+                        )
                     else:
                         raise RuntimeError(f"Unsupported hardware backend: {hardware_backend}")
                 except RuntimeError as exc:
@@ -158,7 +184,7 @@ class TranscodeEngine:
                             work_output.unlink()
                         except FileNotFoundError:
                             pass
-                        self._transcode_cpu(record, source_path, work_output, profile, target_codec)
+                        self._transcode_cpu(record, source_path, work_output, profile, rate_control, target_codec)
                     else:
                         logger.error(
                             "Hardware transcode failed and CPU fallback disabled",
@@ -190,7 +216,7 @@ class TranscodeEngine:
                                 work_output.unlink()
                             except FileNotFoundError:
                                 pass
-                            self._transcode_cpu(record, source_path, work_output, profile, target_codec)
+                            self._transcode_cpu(record, source_path, work_output, profile, rate_control, target_codec)
                         else:
                             logger.error(
                                 "Hardware transcode output exceeds requested profile and CPU fallback disabled",
@@ -209,8 +235,10 @@ class TranscodeEngine:
                                 pass
                             raise RuntimeError("Hardware output exceeds requested profile bounds")
             else:
-                self._transcode_cpu(record, source_path, work_output, profile, target_codec)
+                self._transcode_cpu(record, source_path, work_output, profile, rate_control, target_codec)
             remuxed = False
+            result_backend = hardware_backend or "cpu"
+            result_encoder = encoder or ("libx265" if target_codec == CodecPreference.h265 else "libx264")
 
         shutil.move(work_output, output_path)
         if record.media_duration_seconds is not None:
@@ -219,7 +247,16 @@ class TranscodeEngine:
             "Transcode finished",
             extra={"job_id": job_id, "output_path": str(output_path), "remuxed": remuxed},
         )
-        return TranscodeResult(output_path=output_path, remuxed=remuxed, profile=profile, codec=target_codec)
+        return TranscodeResult(
+            output_path=output_path,
+            remuxed=remuxed,
+            profile=profile,
+            codec=target_codec,
+            quality_profile=request.quality_profile,
+            rate_control=None if remuxed else rate_control,
+            backend=result_backend,
+            encoder=result_encoder,
+        )
 
     def _probe(self, source_path: Path) -> MediaInfo:
         try:
@@ -356,10 +393,10 @@ class TranscodeEngine:
         source_path: Path,
         dest_path: Path,
         profile: QualityProfile,
+        rate_control: RateControl,
         codec: CodecPreference,
     ) -> None:
         video_codec = "libx265" if codec == CodecPreference.h265 else "libx264"
-        bitrate = str(profile.video_bitrate)
         scaled_w, scaled_h = self._compute_scaled_dimensions(record, profile)
         vf = f"scale={scaled_w}:{scaled_h}"
         pad = f"pad={profile.width}:{profile.height}:(ow-iw)/2:(oh-ih)/2"
@@ -376,7 +413,11 @@ class TranscodeEngine:
             "-c:v",
             video_codec,
             "-b:v",
-            bitrate,
+            str(rate_control.average_bitrate),
+            "-maxrate",
+            str(rate_control.peak_bitrate),
+            "-bufsize",
+            str(rate_control.buffer_size),
             "-preset",
             "veryfast",
             "-movflags",
@@ -401,6 +442,7 @@ class TranscodeEngine:
         source_path: Path,
         dest_path: Path,
         profile: QualityProfile,
+        rate_control: RateControl,
         decoder_name: str,
         encoder_name: str,
     ) -> None:
@@ -408,17 +450,18 @@ class TranscodeEngine:
         target_w, target_h = profile.width, profile.height
 
         filter_candidates: list[tuple[str, str]] = []
-        # Keep a broadly compatible RKMPP path: this filter chain works across
-        # current RK1 ffmpeg packages where scale_rkrga format negotiation may fail.
+        # Keep a broadly compatible software-scale path. The RK RGA path is
+        # substantially faster, but benchmarked below the quality envelope for
+        # 4K downscaling and is therefore not used by public quality profiles.
         fallback_filter = f"scale={scaled_w}:{scaled_h},format=nv12"
         if target_w != scaled_w or target_h != scaled_h:
             fallback_filter += f",pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2"
         filter_candidates.append(("format", fallback_filter))
 
+        last_error: RuntimeError | None = None
         decoder_args: list[str] = []
         if decoder_name:
             decoder_args = ["-hwaccel", "rkmpp", "-c:v", decoder_name]
-
         base_cmd = [
             self.settings.ffmpeg_command,
             "-hide_banner",
@@ -429,18 +472,26 @@ class TranscodeEngine:
             "-i",
             str(source_path),
         ]
-
-        last_error: RuntimeError | None = None
         for label, filter_expr in filter_candidates:
             cmd = list(base_cmd)
             cmd.extend(["-vf", filter_expr])
             cmd.extend(["-c:v", encoder_name])
             if encoder_name == "hevc_rkmpp":
                 cmd.extend(["-profile:v", "main", "-tag:v", "hvc1"])
-                bv, maxrate, bufsize = self._hevc_rate_control(target_w)
-                cmd.extend(["-b:v", bv, "-maxrate", maxrate, "-bufsize", bufsize])
             else:
-                cmd.extend(["-b:v", str(profile.video_bitrate)])
+                cmd.extend(["-profile:v", "high"])
+            cmd.extend(
+                [
+                    "-rc_mode",
+                    "0",
+                    "-b:v",
+                    str(rate_control.average_bitrate),
+                    "-maxrate",
+                    str(rate_control.peak_bitrate),
+                    "-bufsize",
+                    str(rate_control.buffer_size),
+                ]
+            )
             cmd.extend(
                 [
                     "-g",
@@ -484,6 +535,7 @@ class TranscodeEngine:
         source_path: Path,
         dest_path: Path,
         profile: QualityProfile,
+        rate_control: RateControl,
         codec: CodecPreference,
     ) -> None:
         scaled_w, scaled_h = self._compute_scaled_dimensions(record, profile)
@@ -508,7 +560,7 @@ class TranscodeEngine:
             "!",
             "nvvidconv",
             "compute-hw=0",
-            "interpolation-method=2",
+            "interpolation-method=3",
             "!",
             f"video/x-raw(memory:NVMM),format=NV12,width={scaled_w},height={scaled_h}",
             "!",
@@ -529,20 +581,27 @@ class TranscodeEngine:
             "!",
             encoder,
             "maxperf-enable=true",
-            f"bitrate={profile.video_bitrate}",
-            "control-rate=1",
+            f"bitrate={rate_control.average_bitrate}",
+            f"peak-bitrate={rate_control.peak_bitrate}",
+            "control-rate=0",
             "iframeinterval=240",
             "insert-sps-pps=true",
-            "!",
-            parser,
-            "config-interval=-1",
-            "!",
-            "qtmux",
-            "faststart=true",
-            "!",
-            "filesink",
-            f"location={video_only}",
         ]
+        if codec == CodecPreference.h264:
+            gst_cmd.append("profile=4")
+        gst_cmd.extend(
+            [
+                "!",
+                parser,
+                "config-interval=-1",
+                "!",
+                "qtmux",
+                "faststart=true",
+                "!",
+                "filesink",
+                f"location={video_only}",
+            ]
+        )
         environment = os.environ.copy()
         environment["GST_PLUGIN_FEATURE_RANK"] = "nvv4l2decoder:MAX"
         logger.info(
@@ -889,13 +948,6 @@ class TranscodeEngine:
             if Path(device).exists():
                 return device
         return None
-
-    def _hevc_rate_control(self, width: int) -> tuple[str, str, str]:
-        if width >= 3800:
-            return "8M", "12M", "18M"
-        if width >= 2500:
-            return "5M", "8M", "12M"
-        return "3M", "5M", "8M"
 
     def _update_progress(self, record, processed_seconds: float, media_duration: float) -> None:
         record.transcode_media_seconds = processed_seconds

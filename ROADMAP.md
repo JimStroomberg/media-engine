@@ -41,6 +41,7 @@
 ## Phase 3: artifact pipelines
 
 - [x] Produce multi-artifact manifests with stage provenance and signed downloads.
+- [x] Add versioned resolution and compression profiles with cross-hardware quality verification.
 - [x] Add probe, audio, subtitle, scene, keyframe, and OCR stages.
 - [ ] Retain sanitized source metadata and downloaded captions from clients such as whY-Tee.
 - [ ] Add independently configurable retention policies for large media and small text artifacts.

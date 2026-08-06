@@ -42,7 +42,9 @@ The control plane and generic worker build on Ubuntu 26.04 LTS. The default Comp
 - **Agent-ready outputs** – `ai_prepare` produces metadata, audio, subtitles, scenes, keyframes, and OCR; `understand` adds diarized transcription, visual descriptions, and a structured agent document.
 - **Hardware-aware pipeline** – uses FFmpeg on CPU/RKMPP and NVIDIA GStreamer on Jetson for NVDEC, VIC transforms,
   and NVENC H.264/H.265 while retaining the same output and worker contracts.
-- **Smart defaults** – omit quality/codec to let the service choose the closest preset (2160p/1080p/720p/480p) based on the source; if you request a higher preset than the input can support, it automatically downgrades to the best fit.
+- **Predictable quality profiles** – choose 360p through 2160p independently from `compact`, `balanced`, or `high`
+  compression; CPU, RKMPP, and NVIDIA workers map those requests to one documented constrained-VBR envelope.
+- **Smart defaults** – omit quality/codec to let the service choose the closest preset based on the source; if you request a higher preset than the input can support, it automatically downgrades to the best fit.
 - **Audio-only path** – send `quality=audio_only` to extract AAC audio without video; this always runs on the CPU and returns an `.m4a`.
 - **Single active job** – an asyncio worker guarantees only one transcode at a time; additional requests queue automatically.
 - **Status + webhooks** – poll v2 job status at any time and optionally select a registered signed endpoint for terminal notifications.
@@ -91,12 +93,14 @@ curl -X POST \
   -F "file=@sample.mp4" \
   -F "quality=auto" \
   -F "codec=auto" \
+  -F "quality_profile=balanced" \
   -F "callback_url=https://example.com/webhook" \
   http://localhost:8080/jobs
 ```
 Fields:
-- `quality` – `auto` (default), `uhd_2160p`, `fhd_1080p`, `hd_720p`, `sd_480p`, or `audio_only`. When a higher preset is requested than the source resolution supports, the engine transparently downgrades to the best matching profile (logged in the job history).
+- `quality` – `auto` (default), `uhd_2160p`, `qhd_1440p`, `fhd_1080p`, `hd_720p`, `sd_480p`, `low_360p`, or `audio_only`. When a higher preset is requested than the source resolution supports, the engine transparently downgrades to the best matching profile (logged in the job history).
 - `codec` – `auto` (default), `h264`, or `h265`.
+- `quality_profile` – `compact`, `balanced` (default), or `high`; controls compression separately from resolution.
 - `callback_url` – optional HTTPS endpoint receiving `{ job_id, status, output_path, message }`.
 
 ### Poll job status
@@ -178,7 +182,9 @@ Environment variables (prefixed with `MEDIA_ENGINE_`):
 | `MEDIA_ENGINE_XAI_TIMEOUT_SECONDS` | `600` | Timeout for one xAI request |
 | `MEDIA_ENGINE_XAI_MAX_RETRIES` | `2` | SDK retries for transient xAI Responses failures |
 
-Quality profiles live in `app/transcode/profiles.py`; adjust widths/bitrates or add new presets as needed.
+The public resolution presets, compression tiers, rate-control tables, backend mappings, and measured hardware results
+are documented in [docs/transcode-quality.md](docs/transcode-quality.md). Their implementation lives in
+`app/transcode/profiles.py`.
 
 ## Run the platform locally
 
@@ -280,8 +286,10 @@ docker compose --env-file .env.local -f compose.yaml -f compose.local-rk1.yaml u
 
 The overlay requires `rkmpp` for newly queued transcode stages, moves the default CPU worker behind the optional `cpu-fallback` profile, and exposes Rockchip devices only to `worker-rk1`. The API and PostgreSQL remain hardware-neutral.
 
-### RK1 performance notes
-A 10s sample (3840x2160 AV1) produced the following timings on an RK1 module:
+### Historical RK1 packaging smoke test
+
+This older 10-second 4K AV1 check established that RKMPP decode and encode worked. It predates the current quality
+contract and should not be used to compare output quality:
 
 | Pipeline | Command highlights | Encode time | Video bitrate | Output size |
 | --- | --- | --- | --- | --- |
@@ -290,7 +298,8 @@ A 10s sample (3840x2160 AV1) produced the following timings on an RK1 module:
 | RKMPP encode (HW decode) | `-hwaccel rkmpp -c:v av1_rkmpp` → `hevc_rkmpp` | ~3.3 s | ~7.7 Mbps | ~9.4 MB |
 | RKMPP encode (HW decode, low bitrate) | same as above with `-b:v 5M` | ~3.5 s | ~4.8 Mbps | ~6.0 MB |
 
-The default quality profile now targets H.265 at 8 Mbps for 4K content; adjust `MEDIA_ENGINE_AV1_THREADS` is no longer needed. Tune bitrates via `MEDIA_ENGINE_FFMPEG_COMMAND` overrides or custom profiles if you want smaller files.
+Current quality behavior is shared with the CPU and NVIDIA backends rather than being an RK1-only bitrate. See
+[docs/transcode-quality.md](docs/transcode-quality.md) for the supported envelopes and current cross-hardware benchmark.
 
 If you deploy on an RK1 (RK3588) host and want hardware decode/encode, install the Rockchip multimedia ffmpeg build inside the container and enable the RKMPP startup guard.
 
@@ -358,7 +367,8 @@ Run `scripts/test_transcode.sh` to submit a file against a running instance and 
   --media-engine http://localhost:8080 \
   --download
 ```
-Adjust `--quality`, `--codec`, or `--poll-interval` to experiment with different profiles. The script polls `/jobs/{id}` until the job settles and optionally downloads the finished artifact into the current directory.
+Adjust `--quality`, `--codec`, `--quality-profile`, or `--poll-interval` to exercise the documented output profiles. The
+script polls `/jobs/{id}` until the job settles and optionally downloads the finished artifact into the current directory.
 
 ## Docker Compose examples
 - **Platform deployment**: `compose.yaml` – PostgreSQL, MinIO, migrations, API, scheduler, and CPU worker.
@@ -378,7 +388,7 @@ docker compose -f docker-compose.cpu.yml up -d
 ## Building + pushing images
 Use the helper in `scripts/dockerbuild.sh` to publish the generic, RK1, and Jetson Xavier NX variants.
 ```bash
-./scripts/dockerbuild.sh v0.4.1
+./scripts/dockerbuild.sh v0.5.0
 ```
 Environment knobs:
 - `IMAGE_REPO` – Docker repository name.

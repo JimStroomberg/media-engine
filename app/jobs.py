@@ -7,7 +7,6 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Optional, List
 
 from fastapi import UploadFile
 
@@ -15,6 +14,7 @@ from .config import get_settings
 from .models import (
     CallbackPayload,
     CodecPreference,
+    EncodingQuality,
     JobDetail,
     JobRequest,
     JobResponse,
@@ -43,19 +43,20 @@ class JobRecord:
     updated_at: datetime
     source_path: Path
     source_filename: str
-    output_path: Optional[Path]
+    output_path: Path | None
     quality: QualityTarget
     codec: CodecPreference
-    callback_url: Optional[str]
-    error: Optional[str] = None
-    download_started_at: Optional[datetime] = None
-    download_finished_at: Optional[datetime] = None
-    transcode_started_at: Optional[datetime] = None
-    transcode_finished_at: Optional[datetime] = None
-    media_duration_seconds: Optional[float] = None
-    transcode_media_seconds: Optional[float] = None
-    source_width: Optional[int] = None
-    source_height: Optional[int] = None
+    quality_profile: EncodingQuality
+    callback_url: str | None
+    error: str | None = None
+    download_started_at: datetime | None = None
+    download_finished_at: datetime | None = None
+    transcode_started_at: datetime | None = None
+    transcode_finished_at: datetime | None = None
+    media_duration_seconds: float | None = None
+    transcode_media_seconds: float | None = None
+    source_width: int | None = None
+    source_height: int | None = None
     cancel_requested: bool = False
 
     def to_detail(self) -> JobDetail:
@@ -93,6 +94,7 @@ class JobRecord:
             output_path=self.output_path,
             quality=self.quality,
             codec=self.codec,
+            quality_profile=self.quality_profile,
             callback_url=self.callback_url,
             error=self.error,
             media_duration_seconds=self.media_duration_seconds,
@@ -119,9 +121,9 @@ class JobManager:
         self.transcoder = transcoder
         self.callbacks = callbacks
         self.queue: asyncio.Queue = asyncio.Queue(maxsize=self.settings.max_queue_size)
-        self.records: Dict[str, JobRecord] = {}
-        self.worker_task: Optional[asyncio.Task] = None
-        self.maintenance_task: Optional[asyncio.Task] = None
+        self.records: dict[str, JobRecord] = {}
+        self.worker_task: asyncio.Task | None = None
+        self.maintenance_task: asyncio.Task | None = None
         self._shutdown = asyncio.Event()
 
     async def start(self) -> None:
@@ -171,6 +173,7 @@ class JobManager:
             output_path=None,
             quality=request.quality,
             codec=request.codec,
+            quality_profile=request.quality_profile,
             callback_url=str(request.callback_url) if request.callback_url else None,
             download_started_at=download_started,
             download_finished_at=download_finished,
@@ -189,11 +192,11 @@ class JobManager:
 
         return JobResponse(job_id=job_id, status=JobStatus.queued, message="Job accepted")
 
-    async def get_job(self, job_id: str) -> Optional[JobDetail]:
+    async def get_job(self, job_id: str) -> JobDetail | None:
         record = self.records.get(job_id)
         return record.to_detail() if record else None
 
-    async def list_jobs(self) -> List[JobDetail]:
+    async def list_jobs(self) -> list[JobDetail]:
         return [record.to_detail() for record in self.records.values()]
 
     async def cancel_job(self, job_id: str) -> bool:
@@ -244,7 +247,10 @@ class JobManager:
 
             record.status = JobStatus.processing
             record.updated_at = datetime.utcnow()
-            logger.info("Processing job", extra={"job_id": record.job_id, "quality": record.quality.value, "codec": record.codec.value})
+            logger.info(
+                "Processing job",
+                extra={"job_id": record.job_id, "quality": record.quality.value, "codec": record.codec.value},
+            )
 
             try:
                 record.transcode_started_at = datetime.utcnow()
@@ -281,7 +287,7 @@ class JobManager:
             finally:
                 self.queue.task_done()
 
-    async def _fire_callback(self, record: JobRecord, message: Optional[str]) -> None:
+    async def _fire_callback(self, record: JobRecord, message: str | None) -> None:
         if not record.callback_url:
             return
         payload = CallbackPayload(

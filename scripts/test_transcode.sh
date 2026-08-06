@@ -3,6 +3,7 @@ set -euo pipefail
 
 QUALITY="auto"
 CODEC="auto"
+QUALITY_PROFILE="balanced"
 POLL_INTERVAL=10
 DOWNLOAD_OUTPUT="false"
 INPUT_FILE=""
@@ -13,11 +14,12 @@ usage() {
 Usage: ${0##*/} --input /path/to/video --media-engine http://host:port [options]
 
 Options:
-  --quality <auto|uhd_2160p|fhd_1080p|hd_720p|sd_480p>  Desired quality preset (default: auto)
-  --codec <auto|h264|h265>                               Preferred codec (default: auto)
-  --poll-interval <seconds>                              Polling interval for job status (default: 3)
-  --download                                             Download completed output to current directory
-  -h, --help                                             Show this help text
+  --quality <preset>                    Resolution: auto, 360p through 2160p, or audio_only (default: auto)
+  --codec <auto|h264|h265>              Preferred codec (default: auto)
+  --quality-profile <profile>           compact, balanced, or high (default: balanced)
+  --poll-interval <seconds>             Polling interval for job status (default: 10)
+  --download                            Download completed output to current directory
+  -h, --help                            Show this help text
 USAGE
 }
 
@@ -72,6 +74,10 @@ while [[ $# -gt 0 ]]; do
       CODEC=${2:-}
       shift 2
       ;;
+    --quality-profile)
+      QUALITY_PROFILE=${2:-}
+      shift 2
+      ;;
     --poll-interval)
       POLL_INTERVAL=${2:-}
       shift 2
@@ -113,6 +119,7 @@ response=$(curl -sSf \
   -F "file=@${INPUT_FILE}" \
   -F "quality=${QUALITY}" \
   -F "codec=${CODEC}" \
+  -F "quality_profile=${QUALITY_PROFILE}" \
   "${MEDIA_ENGINE}/jobs")
 
 job_id=$(parse_json "job_id" <<<"$response")
@@ -122,7 +129,8 @@ if [[ -z "$job_id" ]]; then
 fi
 
 status=$(parse_json "status" <<<"$response")
-printf '[%s] Job %s submitted (quality=%s codec=%s, status=%s)\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$job_id" "$QUALITY" "$CODEC" "$status"
+printf '[%s] Job %s submitted (quality=%s codec=%s profile=%s, status=%s)\n' \
+  "$(date '+%Y-%m-%d %H:%M:%S')" "$job_id" "$QUALITY" "$CODEC" "$QUALITY_PROFILE" "$status"
 printf 'Polling every %ss...\n' "$POLL_INTERVAL"
 
 declare job_detail

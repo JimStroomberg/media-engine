@@ -85,6 +85,9 @@ def test_pipeline_option_defaults_have_one_run_identity() -> None:
     }
 
     omitted = pipeline_run_key(options=pipeline.normalize_options({}), **common)
-    explicit = pipeline_run_key(options=pipeline.normalize_options({"quality": "auto", "codec": "auto"}), **common)
+    explicit = pipeline_run_key(
+        options=pipeline.normalize_options({"quality": "auto", "codec": "auto", "quality_profile": "balanced"}),
+        **common,
+    )
 
     assert omitted == explicit

@@ -4,6 +4,21 @@ All notable Media Engine changes are documented here.
 
 ## Unreleased
 
+## 0.5.0 - 2026-08-06
+
+### Added
+
+- Transcode pipeline version 2 with independent `compact`, `balanced`, and `high` compression profiles plus 360p and
+  1440p resolution targets.
+- Documented rate-control contracts and cross-hardware VMAF, bitrate, file-size, and throughput verification for RK1 and
+  Jetson Xavier NX workers.
+
+### Changed
+
+- CPU, RKMPP, and Jetson encoders now share codec-aware constrained-VBR targets. Jetson uses H.264 High, 10-tap VIC
+  scaling, and an explicit VBR peak; RKMPP uses explicit VBR and H.264 High.
+- The temporary multipart transcoder accepts and reports `quality_profile`, defaulting to `balanced`.
+
 ## 0.4.1 - 2026-08-06
 
 ### Added

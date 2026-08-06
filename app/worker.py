@@ -18,7 +18,7 @@ from . import __version__
 from .config import Settings, ensure_runtime_directories, get_settings
 from .domain.content import sha256_file
 from .hardware import detected_worker_capabilities, detected_worker_runtime
-from .models import CodecPreference, JobRequest, JobStatus, QualityTarget
+from .models import CodecPreference, EncodingQuality, JobRequest, JobStatus, QualityTarget
 from .processors import LocalMediaProcessor, OpenAIMediaProcessor, ProducedArtifact, StageInputFile, XAIMediaProcessor
 from .processors.usage import ProviderUsageEvent, capture_provider_usage, mark_usage_outcome
 from .selftest import run_self_tests
@@ -37,6 +37,7 @@ class WorkerStageRecord:
     source_path: Path
     quality: QualityTarget = QualityTarget.auto
     codec: CodecPreference = CodecPreference.auto
+    quality_profile: EncodingQuality = EncodingQuality.balanced
     status: JobStatus = JobStatus.processing
     source_width: int | None = None
     source_height: int | None = None
@@ -389,9 +390,11 @@ class MediaWorker:
         request = JobRequest(
             quality=QualityTarget(options["quality"]),
             codec=CodecPreference(options["codec"]),
+            quality_profile=EncodingQuality(options.get("quality_profile", EncodingQuality.balanced.value)),
         )
         record.quality = request.quality
         record.codec = request.codec
+        record.quality_profile = request.quality_profile
         result = await self.engine.process(record, request)
         destination = output_dir / result.output_path.name
         shutil.move(result.output_path, destination)

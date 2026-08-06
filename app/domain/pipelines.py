@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, GetJsonSchemaHandler, model_v
 from pydantic.json_schema import JsonSchemaValue
 from pydantic_core import CoreSchema
 
-from ..models import CodecPreference, QualityTarget
+from ..models import CodecPreference, EncodingQuality, QualityTarget
 
 
 class UnsupportedPipeline(ValueError):
@@ -74,11 +74,7 @@ class PipelineDefinition:
 
     @property
     def supported_providers(self) -> tuple[str, ...]:
-        providers = {
-            provider
-            for stage in self.stages
-            for provider in stage.required_capabilities.get("providers", ())
-        }
+        providers = {provider for stage in self.stages for provider in stage.required_capabilities.get("providers", ())}
         for stage in self.stages:
             if stage.provider_selection is not None:
                 providers.update(stage.provider_selection.supported_providers)
@@ -88,8 +84,20 @@ class PipelineDefinition:
 class TranscodeOptions(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    quality: QualityTarget = QualityTarget.auto
+    quality: Literal[
+        "auto",
+        "uhd_2160p",
+        "fhd_1080p",
+        "hd_720p",
+        "sd_480p",
+        "audio_only",
+    ] = "auto"
     codec: CodecPreference = CodecPreference.auto
+
+
+class TranscodeV2Options(TranscodeOptions):
+    quality: QualityTarget = QualityTarget.auto
+    quality_profile: EncodingQuality = EncodingQuality.balanced
 
 
 class MediaPreparationOptions(BaseModel):
@@ -382,8 +390,23 @@ _PIPELINES = {
         name="transcode",
         version="1",
         schema_version="1",
-        processor_versions=MappingProxyType({"transcode-contract": "1"}),
+        processor_versions=MappingProxyType({"transcode-contract": "2"}),
         options_model=TranscodeOptions,
+        stages=(
+            PipelineStageDefinition(
+                name="transcode",
+                processor="transcode",
+                required_capabilities=MappingProxyType({"pipelines": ("transcode",)}),
+                outputs=(PipelineArtifactDefinition("transcoded_media"),),
+            ),
+        ),
+    ),
+    ("transcode", "2"): PipelineDefinition(
+        name="transcode",
+        version="2",
+        schema_version="1",
+        processor_versions=MappingProxyType({"transcode-contract": "2"}),
+        options_model=TranscodeV2Options,
         stages=(
             PipelineStageDefinition(
                 name="transcode",
@@ -454,7 +477,7 @@ _PIPELINES = {
     ),
 }
 
-_LATEST_PIPELINE_VERSIONS = {"transcode": "1", "ai_prepare": "1", "understand": "2"}
+_LATEST_PIPELINE_VERSIONS = {"transcode": "2", "ai_prepare": "1", "understand": "2"}
 
 
 def get_pipeline(name: str, version: str | None = None) -> PipelineDefinition:
